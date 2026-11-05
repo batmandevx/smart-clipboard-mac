@@ -1,29 +1,43 @@
 # ClipStack 📋
 
-A native macOS menu bar clipboard manager and toolbox that brings the best of **Windows Clipboard History (Win+V)** and **PowerToys Text Extractor / Snipping Tool OCR** to macOS.
+A native macOS menu bar clipboard manager and productivity toolbox crafted with **Apple Liquid Glass UI/UX**, fluid spring physics, and on-device machine learning (Apple Vision OCR).
 
 ---
 
-## ✨ Features
+## ✨ Features & Liquid Glass UX
 
-- **Never Lose Copied Items**:
-  Every time you copy something, it is saved into your history without overwriting your previous copies. By default, it keeps your last 20 items (configurable to 50, 100, or 200 in settings).
-- **Images & Screenshot Detection**:
-  - Copies of images (PNG, JPEG, WebP, etc.) from browsers, apps, or Preview are captured with full thumbnails.
-  - Automatically detects new screenshots taken with macOS shortcuts (`⌘⇧3`, `⌘⇧4`, `⌘⇧5`) and adds them to your clipboard history.
-- **On-Device Text Extraction (OCR)**:
-  - Powered by Apple's native Vision framework — fast, completely private, and works 100% offline.
-  - Automatically indexes text inside images so you can **search for images by the text written inside them**.
-  - One-click or `⌘E` shortcut to extract text from any image into a clean plain-text clip.
-- **Screen Text Extractor (`⌘⇧2`)**:
-  - Drag-select any region on your screen (even non-copyable text in videos, web apps, images, or protected PDFs) to instantly OCR and copy the text.
-- **Instant Search & Category Tabs**:
-  - Instant fuzzy search across text, image OCR contents, and file names.
-  - Quick filters: **All**, **Text**, **Images**, and **Pinned**.
-- **Pin Important Snippets**:
-  - Pin items (`⌘P`) so they never get pruned when the history limit is reached.
-- **Smart Auto-Paste**:
-  - Press `Enter` or `⌘1`–`⌘9` to automatically paste the item directly into your active app.
+### 🔮 Apple Liquid Glass Design
+- **Translucent Specular Glass**: Layered materials (`.hudWindow` / `.popover`) with refraction bevel borders and soft ambient glow.
+- **Fluid Spring Animations**: Smooth physics-based hover transitions and interactive card elevation.
+- **Sliding Liquid Segmented Control**: Sliding capsule pill with matched geometry physics across category tabs.
+- **Mac Haptic Feedback**: Subtle mechanical haptics on selection, copying, and pinning.
+
+---
+
+### 🚀 Life-Convenience Power Features
+
+1. **Smart Content Intelligence**:
+   - **Color Detection**: Copied hex colors (e.g. `#6366F1`) or RGB values render a live glass color swatch with one-click hex copying.
+   - **URL & Link Intelligence**: Automatically tags links, detects domains, and adds an **Open in Browser (`⌘O`)** shortcut.
+   - **JSON Detection**: Detects structured JSON with a `{ } JSON` badge.
+
+2. **Quick Look Glass Drawer (`Space`)**:
+   - Press **`Space`** on any item to slide open a detailed preview drawer.
+   - View full-length un-truncated text, word count, character count, and line statistics.
+   - View high-res images and selectable OCR text.
+
+3. **One-Click Transformations (Smart Formatting)**:
+   - **Paste Plain Text (`⇧↩`)**: Strips rich-text styles, weird line endings, and whitespace.
+   - **Case Converters**: One-click convert to `UPPERCASE`, `lowercase`, `Title Case`, `camelCase`, and `snake_case`.
+   - **Beautify JSON**: Re-formats and indents minified JSON with clean syntax.
+
+4. **OCR & Text Extraction**:
+   - Background OCR indexes text inside copied photos and screenshots for instant search.
+   - **`⌘E`**: Extract text from selected image.
+   - **`⌘⇧2`**: Drag any region on screen to extract text.
+
+5. **Category Filters**:
+   - **All**, **Text**, **Images**, **Links**, and **Pinned**.
 
 ---
 
@@ -31,32 +45,23 @@ A native macOS menu bar clipboard manager and toolbox that brings the best of **
 
 | Shortcut | Action |
 | :--- | :--- |
-| **⌘⇧V** | Toggle Clipboard History popup (customizable in menu: `⌥V`, `⌃⌥V`, etc.) |
-| **⌘⇧2** | Extract text from screen region (crosshair drag & OCR) |
-| **↑ / ↓** | Navigate history items |
-| **↩ (Return)** | Paste selected item into active app |
-| **⌘1 … ⌘9** | Instant-paste item 1 through 9 |
-| **⌘E** | Extract text from selected image |
-| **⌘P** | Pin / unpin selected item |
-| **⌘⌫** | Delete selected item |
-| **Space** | Open selected image/file in Preview |
-| **Esc** | Clear search field or dismiss popup |
+| **`⌘⇧V`** | Open Clipboard History |
+| **`⌘⇧2`** | Interactive Screen Text Extractor (drag region & OCR) |
+| **`Space`** | Toggle Quick Look preview drawer & text tools |
+| **`↩ (Return)`** | Paste item into active app |
+| **`⇧↩ (Shift+Return)`** | Paste as clean plain text |
+| **`⌘1` … `⌘9`** | Instant-paste items 1 through 9 |
+| **`⌘O`** | Open URL in default browser (if clip is a link) |
+| **`⌘E`** | Extract text from image |
+| **`⌘P`** | Pin / unpin item |
+| **`⌘⌫`** | Delete item |
+| **`Esc`** | Close Quick Look / clear search / dismiss |
 
 ---
 
-## 🚀 How to Run & Install
+## 🛠️ Build & Install
 
-### Quick Build & Run
-Run the build script to compile and install into `/Applications`:
 ```bash
 ./build.sh install
 ```
-Or build without installing:
-```bash
-./build.sh
-open build/ClipStack.app
-```
-
-### Accessibility Permission (for Auto-Paste)
-To allow ClipStack to automatically paste items into your active application when you press `Enter` or click an item, grant **Accessibility** permission when prompted (or open **System Settings → Privacy & Security → Accessibility** and toggle **ClipStack** on).  
-*If permission is not granted, ClipStack will still copy the item to your clipboard and show a reminder to press `⌘V`.*
+Installed directly to `/Applications/ClipStack.app` and enabled at login.

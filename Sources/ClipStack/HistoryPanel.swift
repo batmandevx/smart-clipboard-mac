@@ -6,6 +6,7 @@ enum ClipFilter: String, CaseIterable, Identifiable {
     case all = "All"
     case text = "Text"
     case images = "Images"
+    case links = "Links"
     case pinned = "Pinned"
 
     var id: String { rawValue }
@@ -14,6 +15,7 @@ enum ClipFilter: String, CaseIterable, Identifiable {
         case .all: return "square.grid.2x2"
         case .text: return "text.alignleft"
         case .images: return "photo"
+        case .links: return "link"
         case .pinned: return "pin.fill"
         }
     }
@@ -26,6 +28,7 @@ final class PanelState: ObservableObject {
     @Published var selection = 0
     @Published var scrollTarget: UUID?
     @Published var focusToken = 0
+    @Published var quickLookItem: ClipItem?
 
     func filtered(_ items: [ClipItem]) -> [ClipItem] {
         var list = items
@@ -37,6 +40,11 @@ final class PanelState: ObservableObject {
         case .images:
             list = list.filter { item in
                 item.kind == .image || (item.kind == .file && ClipboardStore.shared.ocrURL(for: item) != nil)
+            }
+        case .links:
+            list = list.filter { item in
+                guard item.kind == .text, let text = item.text else { return false }
+                return SmartText.url(from: text) != nil
             }
         case .pinned:
             list = list.filter { $0.pinned }
@@ -50,10 +58,13 @@ final class PanelState: ObservableObject {
 
 struct PanelActions {
     var paste: (ClipItem) -> Void
+    var pastePlainText: (ClipItem) -> Void
     var copyOnly: (ClipItem) -> Void
     var togglePin: (ClipItem) -> Void
     var delete: (ClipItem) -> Void
     var extractText: (ClipItem) -> Void
+    var applyTransform: (ClipItem, String) -> Void
+    var openURL: (URL) -> Void
     var reveal: (ClipItem) -> Void
     var clear: () -> Void
     var captureScreenText: () -> Void
@@ -77,8 +88,10 @@ final class FloatingPanel: NSPanel {
         hidesOnDeactivate = false
         isReleasedWhenClosed = false
         backgroundColor = .clear
+        isOpaque = false
+        hasShadow = true
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
-        minSize = NSSize(width: 350, height: 400)
+        minSize = NSSize(width: 360, height: 420)
         [.closeButton, .miniaturizeButton, .zoomButton].forEach { standardWindowButton($0)?.isHidden = true }
     }
 
@@ -101,15 +114,18 @@ final class PanelController {
 
     init(store: ClipboardStore) {
         self.store = store
-        panel = FloatingPanel(size: NSSize(width: 390, height: 560))
+        panel = FloatingPanel(size: NSSize(width: 410, height: 580))
         panel.onResignKey = { [weak self] in self?.hide() }
 
         let actions = PanelActions(
             paste: { [weak self] in self?.paste($0) },
+            pastePlainText: { [weak self] in self?.pastePlainText($0) },
             copyOnly: { [weak self] in self?.copyOnly($0) },
-            togglePin: { [weak self] in self?.store.togglePin($0) },
-            delete: { [weak self] in self?.store.delete($0) },
+            togglePin: { [weak self] in self?.togglePin($0) },
+            delete: { [weak self] in self?.delete($0) },
             extractText: { [weak self] in self?.extractText($0) },
+            applyTransform: { [weak self] item, newText in self?.applyTransform(item, newText: newText) },
+            openURL: { [weak self] url in self?.openURL(url) },
             reveal: { [weak self] in self?.reveal($0) },
             clear: { [weak self] in self?.store.clearUnpinned() },
             captureScreenText: { ScreenTextCapture.start() },
@@ -127,6 +143,7 @@ final class PanelController {
     func show(nearItem: NSStatusItem? = nil, nearMouse: Bool = false) {
         state.query = ""
         state.selection = 0
+        state.quickLookItem = nil
         state.scrollTarget = store.items.first?.id
         position(nearItem: nearItem, nearMouse: nearMouse)
         panel.makeKeyAndOrderFront(nil)
@@ -137,6 +154,7 @@ final class PanelController {
     func hide() {
         guard panel.isVisible else { return }
         panel.orderOut(nil)
+        state.quickLookItem = nil
         if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
         keyMonitor = nil
     }
@@ -163,7 +181,7 @@ final class PanelController {
         var origin: NSPoint
         if nearMouse {
             origin = NSPoint(x: mouse.x - size.width / 2, y: mouse.y - size.height - 12)
-            if origin.y < vf.minY { origin.y = mouse.y + 12 } // flip above cursor if near bottom
+            if origin.y < vf.minY { origin.y = mouse.y + 12 }
         } else {
             origin = NSPoint(x: vf.midX - size.width / 2, y: vf.midY - size.height / 2 + vf.height * 0.08)
         }
@@ -192,6 +210,7 @@ final class PanelController {
 
     private func handle(_ e: NSEvent) -> Bool {
         let cmd = e.modifierFlags.contains(.command)
+        let shift = e.modifierFlags.contains(.shift)
         let count = visibleItems.count
 
         // ⌘1 … ⌘9 → paste that item
@@ -203,6 +222,12 @@ final class PanelController {
 
         switch Int(e.keyCode) {
         case kVK_Escape:
+            if state.quickLookItem != nil {
+                withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                    state.quickLookItem = nil
+                }
+                return true
+            }
             if state.query.isEmpty { hide() } else { state.query = "" }
             return true
         case kVK_DownArrow:
@@ -210,26 +235,43 @@ final class PanelController {
         case kVK_UpArrow:
             move(by: -1, count: count); return true
         case kVK_Return, kVK_ANSI_KeypadEnter:
-            if let item = selectedItem { paste(item) }
+            if let item = selectedItem {
+                if shift {
+                    pastePlainText(item)
+                } else {
+                    paste(item)
+                }
+            }
             return true
         case kVK_Delete where cmd, kVK_ForwardDelete where cmd:
-            if let item = selectedItem { store.delete(item) }
+            if let item = selectedItem { delete(item) }
             return true
         case kVK_ANSI_P where cmd:
-            if let item = selectedItem { store.togglePin(item) }
+            if let item = selectedItem { togglePin(item) }
             return true
         case kVK_ANSI_E where cmd:
             if let item = selectedItem { extractText(item) }
             return true
+        case kVK_ANSI_O where cmd:
+            if let item = selectedItem, let text = item.text, let url = SmartText.url(from: text) {
+                openURL(url)
+                return true
+            }
+            return false
         case kVK_ANSI_C where cmd && state.query.isEmpty:
             if let item = selectedItem { copyOnly(item) }
             return true
         case kVK_Space where state.query.isEmpty:
             if let item = selectedItem {
-                if let url = store.ocrURL(for: item) {
-                    NSWorkspace.shared.open(url)
-                    return true
+                Haptics.tap()
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+                    if state.quickLookItem?.id == item.id {
+                        state.quickLookItem = nil
+                    } else {
+                        state.quickLookItem = item
+                    }
                 }
+                return true
             }
             return false
         default:
@@ -239,13 +281,18 @@ final class PanelController {
 
     private func move(by delta: Int, count: Int) {
         guard count > 0 else { return }
+        Haptics.tap()
         state.selection = min(max(state.selection + delta, 0), count - 1)
         state.scrollTarget = visibleItems[state.selection].id
+        if state.quickLookItem != nil {
+            state.quickLookItem = selectedItem
+        }
     }
 
     // MARK: - Actions
 
     private func paste(_ item: ClipItem) {
+        Haptics.click()
         store.copyToPasteboard(item)
         hide()
         guard Prefs.autoPaste else { HUD.show("Copied"); return }
@@ -256,10 +303,38 @@ final class PanelController {
         }
     }
 
+    private func pastePlainText(_ item: ClipItem) {
+        Haptics.click()
+        guard let text = item.text else { paste(item); return }
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(clean, forType: .string)
+        hide()
+        guard Prefs.autoPaste else { HUD.show("Copied Plain Text", symbol: "doc.plaintext"); return }
+        if Paster.isTrusted {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { Paster.pasteCommandV() }
+        } else {
+            HUD.show("Copied Plain Text — ⌘V to paste", symbol: "doc.plaintext")
+        }
+    }
+
     private func copyOnly(_ item: ClipItem) {
+        Haptics.tap()
         store.copyToPasteboard(item)
         hide()
         HUD.show("Copied")
+    }
+
+    private func togglePin(_ item: ClipItem) {
+        Haptics.tap()
+        store.togglePin(item)
+    }
+
+    private func delete(_ item: ClipItem) {
+        Haptics.tap()
+        if state.quickLookItem?.id == item.id { state.quickLookItem = nil }
+        store.delete(item)
     }
 
     private func extractText(_ item: ClipItem) {
@@ -267,6 +342,7 @@ final class PanelController {
             HUD.show("Not an image", symbol: "exclamationmark.triangle.fill")
             return
         }
+        Haptics.tap()
         Task { @MainActor in
             let text = await store.recognizedText(for: item).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else {
@@ -282,6 +358,26 @@ final class PanelController {
         }
     }
 
+    private func applyTransform(_ item: ClipItem, newText: String) {
+        Haptics.click()
+        let newItem = store.addText(newText, source: "Transformed")
+        store.copyToPasteboard(newItem)
+        state.quickLookItem = nil
+        hide()
+        guard Prefs.autoPaste else { HUD.show("Transformed & Copied", symbol: "wand.and.stars"); return }
+        if Paster.isTrusted {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { Paster.pasteCommandV() }
+        } else {
+            HUD.show("Transformed & Copied — ⌘V", symbol: "wand.and.stars")
+        }
+    }
+
+    private func openURL(_ url: URL) {
+        Haptics.tap()
+        NSWorkspace.shared.open(url)
+        hide()
+    }
+
     private func reveal(_ item: ClipItem) {
         let url: URL? = item.kind == .file ? item.filePaths?.first.map { URL(fileURLWithPath: $0) } : store.imageURL(for: item)
         if let url { NSWorkspace.shared.activateFileViewerSelecting([url]) }
@@ -289,50 +385,97 @@ final class PanelController {
     }
 }
 
-// MARK: - Views
+// MARK: - Main Views
 
 struct HistoryView: View {
     @ObservedObject var store: ClipboardStore
     @ObservedObject var state: PanelState
     let actions: PanelActions
     @FocusState private var searchFocused: Bool
+    @Namespace private var tabNamespace
 
     var body: some View {
         let items = state.filtered(store.items)
         let selection = items.isEmpty ? -1 : min(state.selection, items.count - 1)
 
-        VStack(spacing: 0) {
-            header
-            searchField
-            filterBar
-            Divider().opacity(0.12)
-            if items.isEmpty {
-                emptyState
-            } else {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(spacing: 6) {
-                            ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                                ClipRow(item: item, index: index, selected: index == selection,
-                                        store: store, actions: actions)
-                                    .id(item.id)
-                                    .onTapGesture { actions.paste(item) }
-                                    .onHover { if $0 { state.selection = index } }
+        ZStack {
+            // Base Apple Liquid Glass backdrop
+            VisualEffect(material: .hudWindow)
+                .ignoresSafeArea()
+
+            LinearGradient(
+                stops: [
+                    .init(color: Color.white.opacity(0.08), location: 0.0),
+                    .init(color: Color.white.opacity(0.01), location: 0.5),
+                    .init(color: Color.accentColor.opacity(0.03), location: 1.0)
+                ],
+                startPoint: .topLeading, endPoint: .bottomTrailing
+            )
+            .ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                header
+                searchField
+                filterBar
+                Divider().opacity(0.08)
+
+                if items.isEmpty {
+                    emptyState
+                } else {
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            LazyVStack(spacing: 6) {
+                                ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                                    ClipRow(item: item, index: index, selected: index == selection,
+                                            store: store, state: state, actions: actions)
+                                        .id(item.id)
+                                        .onTapGesture { actions.paste(item) }
+                                        .onHover { if $0 { state.selection = index } }
+                                }
                             }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
                         }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                    }
-                    .onChange(of: state.scrollTarget) { _, target in
-                        guard let target else { return }
-                        withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(target) }
+                        .onChange(of: state.scrollTarget) { _, target in
+                            guard let target else { return }
+                            withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(target) }
+                        }
                     }
                 }
+                footer
             }
-            footer
+
+            // Quick Look Glass Drawer
+            if let qItem = state.quickLookItem {
+                QuickLookDrawer(item: qItem, store: store, actions: actions) {
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+                        state.quickLookItem = nil
+                    }
+                }
+                .transition(.asymmetric(
+                    insertion: .move(edge: .bottom).combined(with: .opacity),
+                    removal: .move(edge: .bottom).combined(with: .opacity)
+                ))
+                .zIndex(10)
+            }
         }
-        .frame(minWidth: 350, minHeight: 400)
-        .background(VisualEffect(material: .popover).ignoresSafeArea())
+        .frame(minWidth: 380, minHeight: 460)
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(
+                    LinearGradient(
+                        stops: [
+                            .init(color: Color.white.opacity(0.40), location: 0.0),
+                            .init(color: Color.white.opacity(0.12), location: 0.35),
+                            .init(color: Color.white.opacity(0.03), location: 0.70),
+                            .init(color: Color.white.opacity(0.20), location: 1.0)
+                        ],
+                        startPoint: .topLeading, endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 1
+                )
+        )
         .onChange(of: state.focusToken) { _, _ in searchFocused = true }
         .onChange(of: state.query) { _, _ in state.selection = 0 }
         .onAppear { searchFocused = true }
@@ -341,13 +484,13 @@ struct HistoryView: View {
     private var header: some View {
         HStack(spacing: 8) {
             Image(systemName: "doc.on.clipboard.fill")
-                .foregroundStyle(.tint)
-                .font(.system(size: 14))
+                .foregroundStyle(Color.accentColor)
+                .font(.system(size: 14, weight: .semibold))
             Text("Clipboard")
                 .font(.system(size: 13.5, weight: .semibold))
             Text("\(store.items.count)")
-                .font(.system(size: 11, weight: .medium))
-                .padding(.horizontal, 6).padding(.vertical, 1)
+                .font(.system(size: 11, weight: .semibold))
+                .padding(.horizontal, 6).padding(.vertical, 1.5)
                 .background(Capsule().fill(Color.primary.opacity(0.08)))
 
             Spacer()
@@ -356,7 +499,7 @@ struct HistoryView: View {
                 actions.captureScreenText()
             } label: {
                 Image(systemName: "text.viewfinder")
-                    .font(.system(size: 12))
+                    .font(.system(size: 12.5))
             }
             .buttonStyle(.borderless)
             .help("Extract text from any screen region (⌘⇧2)")
@@ -365,7 +508,7 @@ struct HistoryView: View {
                 actions.clear()
             } label: {
                 Image(systemName: "trash")
-                    .font(.system(size: 12))
+                    .font(.system(size: 12.5))
             }
             .buttonStyle(.borderless)
             .help("Clear history (keeps pinned items)")
@@ -374,7 +517,7 @@ struct HistoryView: View {
                 actions.openSettings(nil)
             } label: {
                 Image(systemName: "gearshape")
-                    .font(.system(size: 12))
+                    .font(.system(size: 12.5))
             }
             .buttonStyle(.borderless)
             .help("Preferences & settings")
@@ -389,7 +532,7 @@ struct HistoryView: View {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
                 .font(.system(size: 12))
-            TextField("Search text or words inside images…", text: $state.query)
+            TextField("Search text, links, or text inside images…", text: $state.query)
                 .textFieldStyle(.plain)
                 .font(.system(size: 12.5))
                 .focused($searchFocused)
@@ -406,40 +549,81 @@ struct HistoryView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.06)))
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.primary.opacity(0.06))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.6)
+                )
+        )
         .padding(.horizontal, 10)
         .padding(.bottom, 6)
     }
 
     private var filterBar: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 3) {
             ForEach(ClipFilter.allCases) { filter in
                 let count = count(for: filter)
+                let isSelected = state.filter == filter
+
                 Button {
-                    state.filter = filter
+                    Haptics.tap()
+                    withAnimation(.spring(response: 0.26, dampingFraction: 0.78)) {
+                        state.filter = filter
+                        state.selection = 0
+                    }
                 } label: {
-                    HStack(spacing: 3) {
+                    HStack(spacing: 4) {
                         Image(systemName: filter.icon)
-                            .font(.system(size: 10))
+                            .font(.system(size: 10, weight: isSelected ? .semibold : .regular))
                         Text(filter.rawValue)
+                            .font(.system(size: 11.5, weight: isSelected ? .semibold : .medium))
                         if count > 0 && filter != .all {
                             Text("\(count)")
                                 .font(.system(size: 9.5, weight: .bold))
-                                .opacity(0.8)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 0.5)
+                                .background(
+                                    Capsule()
+                                        .fill(isSelected ? Color.white.opacity(0.25) : Color.primary.opacity(0.08))
+                                )
                         }
                     }
-                    .font(.system(size: 11, weight: state.filter == filter ? .semibold : .regular))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(
-                        Capsule().fill(state.filter == filter ? Color.accentColor : Color.primary.opacity(0.06))
-                    )
-                    .foregroundStyle(state.filter == filter ? Color.white : Color.primary)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .foregroundStyle(isSelected ? Color.white : Color.primary.opacity(0.75))
+                    .background {
+                        if isSelected {
+                            Capsule()
+                                .fill(
+                                    LinearGradient(
+                                        colors: [Color.accentColor, Color.accentColor.opacity(0.85)],
+                                        startPoint: .top, endPoint: .bottom
+                                    )
+                                )
+                                .overlay(
+                                    Capsule()
+                                        .strokeBorder(Color.white.opacity(0.28), lineWidth: 0.8)
+                                )
+                                .shadow(color: Color.accentColor.opacity(0.35), radius: 6, x: 0, y: 2)
+                                .matchedGeometryEffect(id: "liquidTab", in: tabNamespace)
+                        }
+                    }
+                    .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
             }
             Spacer()
         }
+        .padding(3)
+        .background(
+            Capsule()
+                .fill(Color.primary.opacity(0.038))
+                .overlay(
+                    Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5)
+                )
+        )
         .padding(.horizontal, 10)
         .padding(.bottom, 8)
     }
@@ -452,6 +636,11 @@ struct HistoryView: View {
             return store.items.filter { $0.kind == .text }.count
         case .images:
             return store.items.filter { $0.kind == .image || ($0.kind == .file && store.ocrURL(for: $0) != nil) }.count
+        case .links:
+            return store.items.filter { item in
+                guard item.kind == .text, let text = item.text else { return false }
+                return SmartText.url(from: text) != nil
+            }.count
         case .pinned:
             return store.items.filter { $0.pinned }.count
         }
@@ -461,7 +650,7 @@ struct HistoryView: View {
         VStack(spacing: 10) {
             Spacer()
             Image(systemName: state.query.isEmpty ? "doc.on.clipboard" : "magnifyingglass")
-                .font(.system(size: 36)).foregroundStyle(.tertiary)
+                .font(.system(size: 38)).foregroundStyle(.tertiary)
             Text(state.query.isEmpty ? "Copy text, images, or screenshots to see them here" : "No matches found")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(.secondary)
@@ -478,9 +667,10 @@ struct HistoryView: View {
     private var footer: some View {
         HStack(spacing: 12) {
             hint("↩", "paste")
-            hint("⌘E", "extract text")
+            hint("⇧↩", "plain")
+            hint("Space", "preview")
+            hint("⌘E", "OCR")
             hint("⌘P", "pin")
-            hint("⌘⌫", "delete")
             Spacer()
             Text("Limit: \(Prefs.historyLimit)")
         }
@@ -488,7 +678,7 @@ struct HistoryView: View {
         .foregroundStyle(.secondary)
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
-        .background(Color.primary.opacity(0.04))
+        .background(Color.primary.opacity(0.03))
     }
 
     private func hint(_ key: String, _ label: String) -> some View {
@@ -499,11 +689,14 @@ struct HistoryView: View {
     }
 }
 
+// MARK: - Row View
+
 struct ClipRow: View {
     let item: ClipItem
     let index: Int
     let selected: Bool
     @ObservedObject var store: ClipboardStore
+    @ObservedObject var state: PanelState
     let actions: PanelActions
     @State private var hovering = false
 
@@ -522,27 +715,33 @@ struct ClipRow: View {
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(selected ? Color.accentColor.opacity(0.20) : Color.primary.opacity(0.05))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(selected ? Color.accentColor.opacity(0.55) : .clear, lineWidth: 1)
-        )
+        .liquidGlassCard(isSelected: selected, isHovered: hovering, cornerRadius: 11)
         .overlay(alignment: .topTrailing) {
             if hovering || selected { buttons.padding(6) }
         }
-        .contentShape(RoundedRectangle(cornerRadius: 10))
+        .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
         .onHover { hovering = $0 }
         .contextMenu {
             Button("Paste") { actions.paste(item) }
-            Button("Copy") { actions.copyOnly(item) }
-            if canOCR { Button("Extract Text") { actions.extractText(item) } }
-            Button(item.pinned ? "Unpin" : "Pin") { actions.togglePin(item) }
+            Button("Paste as Plain Text (⇧↩)") { actions.pastePlainText(item) }
+            Button("Copy Only") { actions.copyOnly(item) }
+
+            if let text = item.text, let url = SmartText.url(from: text) {
+                Button("Open Link in Browser (⌘O)") { actions.openURL(url) }
+            }
+            if canOCR {
+                Button("Extract Text (⌘E)") { actions.extractText(item) }
+            }
+            Button(item.pinned ? "Unpin" : "Pin (⌘P)") { actions.togglePin(item) }
             if item.kind != .text { Button("Show in Finder") { actions.reveal(item) } }
             Divider()
-            Button("Delete", role: .destructive) { actions.delete(item) }
+            Button("Quick Look (Space)") {
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+                    state.quickLookItem = item
+                }
+            }
+            Divider()
+            Button("Delete (⌘⌫)", role: .destructive) { actions.delete(item) }
         }
     }
 
@@ -550,11 +749,38 @@ struct ClipRow: View {
     private var content: some View {
         switch item.kind {
         case .text:
-            Text(item.preview)
-                .font(.system(size: 12.5))
-                .lineLimit(4)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.trailing, 72)
+            VStack(alignment: .leading, spacing: 4) {
+                // Color swatch header if it's a hex color
+                if let text = item.text, let col = SmartText.color(from: text) {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(Color(nsColor: col))
+                            .frame(width: 14, height: 14)
+                            .overlay(Circle().strokeBorder(Color.white.opacity(0.3), lineWidth: 1))
+                            .shadow(color: Color(nsColor: col).opacity(0.4), radius: 3)
+                        Text(SmartText.hexString(from: col))
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                // URL indicator
+                if let text = item.text, let url = SmartText.url(from: text) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "link")
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundStyle(Color.accentColor)
+                        Text(url.host ?? "Website")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Color.accentColor)
+                    }
+                }
+                // Main Text preview
+                Text(item.preview)
+                    .font(.system(size: 12.5, design: (item.text?.hasPrefix("{") == true) ? .monospaced : .default))
+                    .lineLimit(4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.trailing, 72)
+            }
         case .image:
             thumbnail
         case .file:
@@ -575,8 +801,8 @@ struct ClipRow: View {
                 .resizable()
                 .aspectRatio(contentMode: .fit)
                 .frame(maxWidth: .infinity, maxHeight: 130, alignment: .leading)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.primary.opacity(0.1)))
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(Color.white.opacity(0.12), lineWidth: 0.8))
         } else {
             Label("Image unavailable", systemImage: "photo").foregroundStyle(.secondary)
         }
@@ -601,6 +827,12 @@ struct ClipRow: View {
                     .padding(.horizontal, 5).padding(.vertical, 1)
                     .background(Capsule().fill(Color.accentColor.opacity(0.18)))
             }
+            if let text = item.text, SmartText.prettyJSON(from: text) != nil {
+                Text("{ } JSON")
+                    .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                    .padding(.horizontal, 4).padding(.vertical, 1)
+                    .background(Capsule().fill(Color.primary.opacity(0.08)))
+            }
             Spacer()
             if index < 9 {
                 Text("⌘\(index + 1)").fontWeight(.medium)
@@ -612,14 +844,23 @@ struct ClipRow: View {
 
     private var kindIcon: String {
         switch item.kind {
-        case .text: return "text.alignleft"
-        case .image: return item.source == "Screenshot" ? "camera.viewfinder" : "photo"
-        case .file: return "folder"
+        case .text:
+            if let t = item.text, SmartText.url(from: t) != nil { return "link" }
+            return "text.alignleft"
+        case .image:
+            return item.source == "Screenshot" ? "camera.viewfinder" : "photo"
+        case .file:
+            return "folder"
         }
     }
 
     private var buttons: some View {
         HStack(spacing: 2) {
+            iconButton("eye", help: "Quick Look (Space)") {
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+                    state.quickLookItem = item
+                }
+            }
             if canOCR {
                 iconButton("text.viewfinder", help: "Extract text (⌘E)") { actions.extractText(item) }
             }
@@ -627,7 +868,11 @@ struct ClipRow: View {
             iconButton("trash", help: "Delete (⌘⌫)") { actions.delete(item) }
         }
         .padding(3)
-        .background(RoundedRectangle(cornerRadius: 7).fill(.regularMaterial))
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.white.opacity(0.15), lineWidth: 0.5))
+        )
     }
 
     private func iconButton(_ symbol: String, help: String, action: @escaping () -> Void) -> some View {
@@ -639,5 +884,215 @@ struct ClipRow: View {
         }
         .buttonStyle(.borderless)
         .help(help)
+    }
+}
+
+// MARK: - Quick Look Glass Drawer
+
+struct QuickLookDrawer: View {
+    let item: ClipItem
+    @ObservedObject var store: ClipboardStore
+    let actions: PanelActions
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header bar
+            HStack(spacing: 8) {
+                Image(systemName: "sparkles")
+                    .foregroundStyle(Color.accentColor)
+                Text("Quick Look")
+                    .font(.system(size: 13, weight: .semibold))
+
+                if let text = item.text {
+                    let stats = SmartText.stats(for: text)
+                    Text("\(stats.words) words · \(stats.chars) chars")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6).padding(.vertical, 1.5)
+                        .background(Capsule().fill(Color.primary.opacity(0.06)))
+                }
+
+                Spacer()
+
+                Button(action: onClose) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 15))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 12)
+            .padding(.bottom, 8)
+
+            Divider().opacity(0.1)
+
+            // Content preview area
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    if let text = item.text {
+                        // URL open button if applicable
+                        if let url = SmartText.url(from: text) {
+                            Button {
+                                actions.openURL(url)
+                            } label: {
+                                HStack {
+                                    Image(systemName: "safari")
+                                    Text("Open \(url.host ?? "Link") in Browser")
+                                    Spacer()
+                                    Image(systemName: "arrow.up.right")
+                                }
+                                .font(.system(size: 12.5, weight: .semibold))
+                                .padding(10)
+                                .background(RoundedRectangle(cornerRadius: 8).fill(Color.accentColor.opacity(0.12)))
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        // Color swatch preview
+                        if let col = SmartText.color(from: text) {
+                            HStack(spacing: 12) {
+                                RoundedRectangle(cornerRadius: 8)
+                                    .fill(Color(nsColor: col))
+                                    .frame(width: 44, height: 44)
+                                    .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.white.opacity(0.3), lineWidth: 1))
+                                    .shadow(color: Color(nsColor: col).opacity(0.4), radius: 6)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(SmartText.hexString(from: col))
+                                        .font(.system(size: 14, weight: .bold, design: .monospaced))
+                                    Text("Hex Color")
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .padding(8)
+                            .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.04)))
+                        }
+
+                        // Full readable text
+                        Text(text)
+                            .font(.system(size: 12, design: (item.text?.hasPrefix("{") == true) ? .monospaced : .default))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(10)
+                            .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.035)))
+                    } else if store.ocrURL(for: item) != nil {
+                        // High-res Image preview
+                        if let img = store.thumbnail(for: item) {
+                            Image(nsImage: img)
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                                .frame(maxWidth: .infinity, maxHeight: 220)
+                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        }
+                        if let ocr = item.ocrText, !ocr.isEmpty {
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack {
+                                    Text("Detected Text in Image")
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(.secondary)
+                                    Spacer()
+                                    Button("Copy OCR") {
+                                        actions.copyOnly(ClipItem(kind: .text, text: ocr, hash: ""))
+                                    }
+                                    .font(.system(size: 10.5))
+                                    .buttonStyle(.borderless)
+                                }
+                                Text(ocr)
+                                    .font(.system(size: 11.5))
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(8)
+                                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.04)))
+                            }
+                        }
+                    }
+                }
+                .padding(12)
+            }
+
+            Divider().opacity(0.1)
+
+            // Transformations bottom bar
+            if let text = item.text {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        transformPill("Plain Text") { actions.pastePlainText(item) }
+                        transformPill("UPPERCASE") { actions.applyTransform(item, text.uppercased()) }
+                        transformPill("lowercase") { actions.applyTransform(item, text.lowercased()) }
+                        transformPill("Title Case") { actions.applyTransform(item, text.capitalized) }
+                        transformPill("camelCase") { actions.applyTransform(item, SmartText.toCamelCase(text)) }
+                        transformPill("snake_case") { actions.applyTransform(item, SmartText.toSnakeCase(text)) }
+                        if let pretty = SmartText.prettyJSON(from: text) {
+                            transformPill("Beautify JSON") { actions.applyTransform(item, pretty) }
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                }
+                .background(Color.primary.opacity(0.02))
+            }
+
+            // Action row
+            HStack(spacing: 10) {
+                Button {
+                    actions.copyOnly(item)
+                    onClose()
+                } label: {
+                    Label("Copy", systemImage: "doc.on.doc")
+                        .font(.system(size: 12, weight: .medium))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                }
+                .buttonStyle(.bordered)
+
+                Button {
+                    actions.paste(item)
+                    onClose()
+                } label: {
+                    Label("Paste", systemImage: "arrow.right.doc.on.clipboard")
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(Color.primary.opacity(0.04))
+        }
+        .frame(maxWidth: .infinity, maxHeight: 360)
+        .background(
+            ZStack {
+                VisualEffect(material: .popover)
+                Color.black.opacity(0.2)
+            }
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(
+                    LinearGradient(
+                        colors: [Color.white.opacity(0.35), Color.white.opacity(0.08)],
+                        startPoint: .topLeading, endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 1
+                )
+        )
+        .shadow(color: Color.black.opacity(0.25), radius: 24, x: 0, y: 12)
+        .padding(8)
+    }
+
+    private func transformPill(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 11, weight: .medium))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(Color.primary.opacity(0.07)))
+                .overlay(Capsule().strokeBorder(Color.white.opacity(0.12), lineWidth: 0.5))
+        }
+        .buttonStyle(.plain)
     }
 }
