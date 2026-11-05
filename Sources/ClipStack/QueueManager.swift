@@ -69,3 +69,4 @@ final class QueueManager: ObservableObject {
         HUD.show("Queue [\(currentIndex + 1)/\(queue.count)]: \"\(shortText)\"", symbol: "list.number")
     }
 }
+

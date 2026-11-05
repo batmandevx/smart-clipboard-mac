@@ -5,18 +5,69 @@ import ImageIO
 struct ClipItem: Identifiable, Codable, Equatable {
     enum Kind: String, Codable { case text, image, file }
 
-    var id = UUID()
+    var id: UUID
     var kind: Kind
     var text: String?
     var imageFile: String?      // file name inside the images folder
     var filePaths: [String]?    // for copied Finder files
     var hash: String
-    var date = Date()
-    var pinned = false
+    var date: Date
+    var pinned: Bool
     var source: String?
     var ocrText: String?
     var pixelWidth: Int?
     var pixelHeight: Int?
+    var isSnippet: Bool?
+    var snippetTitle: String?
+    var qrPayload: String?
+
+    var isSnippetItem: Bool { isSnippet ?? false }
+    var hasQRPayload: Bool { !(qrPayload ?? "").isEmpty }
+
+    init(id: UUID = UUID(), kind: Kind, text: String? = nil, imageFile: String? = nil,
+         filePaths: [String]? = nil, hash: String, date: Date = Date(), pinned: Bool = false,
+         source: String? = nil, ocrText: String? = nil, pixelWidth: Int? = nil,
+         pixelHeight: Int? = nil, isSnippet: Bool? = false, snippetTitle: String? = nil,
+         qrPayload: String? = nil) {
+        self.id = id
+        self.kind = kind
+        self.text = text
+        self.imageFile = imageFile
+        self.filePaths = filePaths
+        self.hash = hash
+        self.date = date
+        self.pinned = pinned
+        self.source = source
+        self.ocrText = ocrText
+        self.pixelWidth = pixelWidth
+        self.pixelHeight = pixelHeight
+        self.isSnippet = isSnippet
+        self.snippetTitle = snippetTitle
+        self.qrPayload = qrPayload
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, kind, text, imageFile, filePaths, hash, date, pinned, source, ocrText, pixelWidth, pixelHeight, isSnippet, snippetTitle, qrPayload
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        kind = try c.decode(Kind.self, forKey: .kind)
+        text = try c.decodeIfPresent(String.self, forKey: .text)
+        imageFile = try c.decodeIfPresent(String.self, forKey: .imageFile)
+        filePaths = try c.decodeIfPresent([String].self, forKey: .filePaths)
+        hash = try c.decode(String.self, forKey: .hash)
+        date = try c.decodeIfPresent(Date.self, forKey: .date) ?? Date()
+        pinned = try c.decodeIfPresent(Bool.self, forKey: .pinned) ?? false
+        source = try c.decodeIfPresent(String.self, forKey: .source)
+        ocrText = try c.decodeIfPresent(String.self, forKey: .ocrText)
+        pixelWidth = try c.decodeIfPresent(Int.self, forKey: .pixelWidth)
+        pixelHeight = try c.decodeIfPresent(Int.self, forKey: .pixelHeight)
+        isSnippet = try c.decodeIfPresent(Bool.self, forKey: .isSnippet) ?? false
+        snippetTitle = try c.decodeIfPresent(String.self, forKey: .snippetTitle)
+        qrPayload = try c.decodeIfPresent(String.self, forKey: .qrPayload)
+    }
 
     var preview: String {
         switch kind {
@@ -30,7 +81,7 @@ struct ClipItem: Identifiable, Codable, Equatable {
     }
 
     var searchText: String {
-        [text, ocrText, filePaths?.joined(separator: " "), source]
+        [text, ocrText, filePaths?.joined(separator: " "), source, snippetTitle, qrPayload]
             .compactMap { $0 }
             .joined(separator: " ")
     }
@@ -221,6 +272,7 @@ final class ClipboardStore: ObservableObject {
         }
         lastChangeCount = pb.changeCount
         _ = bump(hash: item.hash)
+        SoundEffects.playCopy()
     }
 
     func togglePin(_ item: ClipItem) {
@@ -244,6 +296,49 @@ final class ClipboardStore: ObservableObject {
         save()
     }
 
+    // MARK: - Snippets
+
+    @discardableResult
+    func createSnippet(title: String, text: String) -> ClipItem {
+        let hash = Self.sha("snippet:\(UUID().uuidString):\(text)")
+        var item = ClipItem(kind: .text, text: text, hash: hash, source: "Snippet")
+        item.isSnippet = true
+        item.snippetTitle = title
+        item.pinned = true
+        insert(item)
+        return item
+    }
+
+    func toggleSnippet(_ item: ClipItem, title: String? = nil) {
+        guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
+        let current = items[idx].isSnippetItem
+        items[idx].isSnippet = !current
+        if !current {
+            items[idx].pinned = true
+            if let title = title, !title.isEmpty {
+                items[idx].snippetTitle = title
+            } else if items[idx].snippetTitle == nil {
+                let sample = (items[idx].text ?? items[idx].ocrText ?? "Snippet").trimmingCharacters(in: .whitespacesAndNewlines)
+                items[idx].snippetTitle = String(sample.prefix(25))
+            }
+        }
+        save()
+    }
+
+    // MARK: - Image Updates
+
+    func updateImageData(for item: ClipItem, pngData: Data) {
+        guard let idx = items.firstIndex(where: { $0.id == item.id }),
+              let fileName = items[idx].imageFile else { return }
+        let fileURL = imagesDir.appendingPathComponent(fileName)
+        try? pngData.write(to: fileURL)
+        let rep = NSBitmapImageRep(data: pngData)
+        items[idx].pixelWidth = rep?.pixelsWide
+        items[idx].pixelHeight = rep?.pixelsHigh
+        thumbCache.removeObject(forKey: item.id.uuidString as NSString)
+        save()
+    }
+
     // MARK: - Export
 
     func exportHistory(to destinationURL: URL) throws {
@@ -256,7 +351,7 @@ final class ClipboardStore: ObservableObject {
     func exportAsMarkdown(to destinationURL: URL) throws {
         var lines: [String] = ["# ClipStack Clipboard Export", "Date: \(Date().formatted())", "Total items: \(items.count)", ""]
         for (i, item) in items.enumerated() {
-            let title = item.source != nil ? "[\(item.source!)]" : "[\(item.kind.rawValue.uppercased())]"
+            let title = item.isSnippetItem ? "[SNIPPET: \(item.snippetTitle ?? "Template")]" : (item.source != nil ? "[\(item.source!)]" : "[\(item.kind.rawValue.uppercased())]")
             lines.append("### \(i + 1). \(title) - \(item.date.formatted())")
             if let text = item.text {
                 lines.append("```\n\(text)\n```")
@@ -265,12 +360,15 @@ final class ClipboardStore: ObservableObject {
             } else if let paths = item.filePaths {
                 lines.append("**Files:**\n" + paths.map { "- \($0)" }.joined(separator: "\n"))
             }
+            if let qr = item.qrPayload {
+                lines.append("**QR / Barcode Payload:** `\(qr)`")
+            }
             lines.append("")
         }
         try lines.joined(separator: "\n").write(to: destinationURL, atomically: true, encoding: .utf8)
     }
 
-    // MARK: - OCR
+    // MARK: - OCR & Vision Analysis
 
     /// Image URL usable for OCR (clipboard images or a single copied image file).
     func ocrURL(for item: ClipItem) -> URL? {
@@ -287,22 +385,25 @@ final class ClipboardStore: ObservableObject {
     func recognizedText(for item: ClipItem) async -> String {
         if let current = items.first(where: { $0.id == item.id }), let t = current.ocrText { return t }
         guard let url = ocrURL(for: item) else { return "" }
-        let text = await OCR.recognize(url: url)
-        setOCR(text, for: item.id)
-        return text
+        let res = await OCR.analyze(url: url)
+        setAnalysis(text: res.text, qrPayload: res.qrPayload, for: item.id)
+        return res.text
     }
 
     private func runOCRInBackground(_ item: ClipItem) {
         guard let url = ocrURL(for: item) else { return }
         Task { [weak self] in
-            let text = await OCR.recognize(url: url)
-            self?.setOCR(text, for: item.id)
+            let res = await OCR.analyze(url: url)
+            self?.setAnalysis(text: res.text, qrPayload: res.qrPayload, for: item.id)
         }
     }
 
-    private func setOCR(_ text: String, for id: UUID) {
+    private func setAnalysis(text: String, qrPayload: String?, for id: UUID) {
         guard let idx = items.firstIndex(where: { $0.id == id }) else { return }
         items[idx].ocrText = text
+        if let qr = qrPayload, !qr.isEmpty {
+            items[idx].qrPayload = qr
+        }
         save()
     }
 
@@ -360,4 +461,3 @@ final class ClipboardStore: ObservableObject {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }
-

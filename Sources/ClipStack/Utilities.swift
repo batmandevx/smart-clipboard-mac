@@ -12,6 +12,18 @@ enum Haptics {
     }
 }
 
+enum SoundEffects {
+    static func playCopy() {
+        guard Prefs.soundFeedback else { return }
+        NSSound(named: "Tink")?.play()
+    }
+
+    static func playPaste() {
+        guard Prefs.soundFeedback else { return }
+        NSSound(named: "Pop")?.play()
+    }
+}
+
 /// Small transient "toast" shown in the middle-bottom of the screen with liquid glass aesthetic.
 @MainActor
 enum HUD {
@@ -172,6 +184,7 @@ enum Paster {
     }
 
     static func pasteCommandV() {
+        SoundEffects.playPaste()
         let src = CGEventSource(stateID: .combinedSessionState)
         let key = CGKeyCode(kVK_ANSI_V)
         let down = CGEvent(keyboardEventSource: src, virtualKey: key, keyDown: true)

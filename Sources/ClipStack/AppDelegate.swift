@@ -163,6 +163,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
         menu.addItem(login)
 
+        let sound = item("Audio Feedback on Copy/Paste", action: #selector(toggleSoundFeedback))
+        sound.state = Prefs.soundFeedback ? .on : .off
+        menu.addItem(sound)
+
+        let mask = item("Mask Sensitive Data (API keys, cards)", action: #selector(toggleMaskSensitive))
+        mask.state = Prefs.autoMaskSensitive ? .on : .off
+        menu.addItem(mask)
+
         menu.addItem(.separator())
 
         // Export submenu
@@ -256,6 +264,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func toggleCopyScreenshots() {
         Prefs.copyScreenshots.toggle()
+    }
+
+    @objc private func toggleSoundFeedback() {
+        Prefs.soundFeedback.toggle()
+        if Prefs.soundFeedback {
+            SoundEffects.playPaste()
+        }
+    }
+
+    @objc private func toggleMaskSensitive() {
+        Prefs.autoMaskSensitive.toggle()
     }
 
     @objc private func toggleLogin() {

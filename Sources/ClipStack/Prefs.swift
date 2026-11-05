@@ -43,6 +43,16 @@ enum Prefs {
         set { d.set(newValue, forKey: "didPromptAccessibility") }
     }
 
+    static var soundFeedback: Bool {
+        get { bool("soundFeedback", default: true) }
+        set { d.set(newValue, forKey: "soundFeedback") }
+    }
+
+    static var autoMaskSensitive: Bool {
+        get { bool("autoMaskSensitive", default: true) }
+        set { d.set(newValue, forKey: "autoMaskSensitive") }
+    }
+
     static var didShowWelcome: Bool {
         get { bool("didShowWelcome", default: false) }
         set { d.set(newValue, forKey: "didShowWelcome") }

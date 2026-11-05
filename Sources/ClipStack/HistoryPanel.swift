@@ -4,6 +4,7 @@ import Carbon.HIToolbox
 
 enum ClipFilter: String, CaseIterable, Identifiable {
     case all = "All"
+    case snippets = "Snippets"
     case text = "Text"
     case images = "Images"
     case links = "Links"
@@ -14,6 +15,7 @@ enum ClipFilter: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .all: return "square.grid.2x2"
+        case .snippets: return "bookmark.fill"
         case .text: return "text.alignleft"
         case .images: return "photo"
         case .links: return "link"
@@ -37,8 +39,10 @@ final class PanelState: ObservableObject {
         switch filter {
         case .all:
             break
+        case .snippets:
+            list = list.filter { $0.isSnippetItem }
         case .text:
-            list = list.filter { $0.kind == .text }
+            list = list.filter { $0.kind == .text && !$0.isSnippetItem }
         case .images:
             list = list.filter { item in
                 item.kind == .image || (item.kind == .file && ClipboardStore.shared.ocrURL(for: item) != nil)
@@ -79,6 +83,11 @@ struct PanelActions {
     var captureScreenText: () -> Void
     var openSettings: (NSView?) -> Void
     var toggleQueue: () -> Void
+    var toggleSnippet: (ClipItem) -> Void
+    var createSnippet: (String, String) -> Void
+    var mergeRecent: () -> Void
+    var compressImage: (ClipItem, CGFloat, CGFloat) -> Void
+    var convertImageToPNG: (ClipItem) -> Void
 }
 
 /// A panel that can take keyboard focus without activating the app, so the
@@ -141,7 +150,12 @@ final class PanelController {
             clear: { [weak self] in self?.store.clearUnpinned() },
             captureScreenText: { ScreenTextCapture.start() },
             openSettings: { [weak self] view in self?.onOpenSettings?(view) },
-            toggleQueue: { [weak self] in self?.toggleQueueMode() }
+            toggleQueue: { [weak self] in self?.toggleQueueMode() },
+            toggleSnippet: { [weak self] in self?.toggleSnippet($0) },
+            createSnippet: { [weak self] title, text in self?.createSnippet(title: title, text: text) },
+            mergeRecent: { [weak self] in self?.mergeRecent() },
+            compressImage: { [weak self] item, q, s in self?.compressImage(item, quality: q, scale: s) },
+            convertImageToPNG: { [weak self] item in self?.convertImageToPNG(item) }
         )
         panel.contentView = NSHostingView(rootView: HistoryView(store: store, state: state, actions: actions))
     }
@@ -394,6 +408,68 @@ final class PanelController {
         }
     }
 
+    private func toggleSnippet(_ item: ClipItem) {
+        Haptics.tap()
+        store.toggleSnippet(item)
+        HUD.show(item.isSnippetItem ? "Removed from snippets" : "Saved as snippet", symbol: "bookmark.fill")
+    }
+
+    private func createSnippet(title: String, text: String) {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        Haptics.click()
+        let item = store.createSnippet(title: title.isEmpty ? "Snippet" : title, text: text)
+        state.query = ""
+        state.selection = 0
+        state.scrollTarget = item.id
+        HUD.show("Snippet created!", symbol: "bookmark.fill")
+    }
+
+    private func mergeRecent() {
+        let textClips = store.items.filter { $0.text != nil || $0.ocrText != nil }
+        guard textClips.count >= 2 else {
+            HUD.show("Need at least 2 clips to merge", symbol: "rectangle.stack")
+            return
+        }
+        let top3 = Array(textClips.prefix(3).reversed())
+        let merged = SmartText.mergeClips(top3, separator: "\n\n")
+        let item = store.addText(merged, source: "Merged (\(top3.count) clips)")
+        store.copyToPasteboard(item)
+        state.selection = 0
+        state.scrollTarget = item.id
+        HUD.show("Merged \(top3.count) clips & copied!", symbol: "rectangle.stack.badge.plus")
+    }
+
+    private func compressImage(_ item: ClipItem, quality: CGFloat, scale: CGFloat) {
+        guard let url = store.ocrURL(for: item) ?? store.imageURL(for: item),
+              let origData = try? Data(contentsOf: url) else { return }
+        guard let compressed = SmartText.compressImage(data: origData, quality: quality, scale: scale) else {
+            HUD.show("Compression failed", symbol: "exclamationmark.triangle")
+            return
+        }
+        Haptics.click()
+        let oldKB = origData.count / 1024
+        let newKB = compressed.count / 1024
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setData(compressed, forType: .png)
+        if let tiff = NSImage(data: compressed)?.tiffRepresentation {
+            pb.setData(tiff, forType: .tiff)
+        }
+        let pct = Int((1.0 - (Double(compressed.count) / Double(max(origData.count, 1)))) * 100)
+        HUD.show("Compressed: \(oldKB)KB → \(newKB)KB (-\(pct)%)", symbol: "arrow.down.right.and.arrow.up.left")
+    }
+
+    private func convertImageToPNG(_ item: ClipItem) {
+        guard let url = store.ocrURL(for: item) ?? store.imageURL(for: item),
+              let origData = try? Data(contentsOf: url),
+              let png = SmartText.convertToPNG(data: origData) else { return }
+        Haptics.click()
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setData(png, forType: .png)
+        HUD.show("Copied as PNG", symbol: "photo.badge.checkmark")
+    }
+
     private func openURL(_ url: URL) {
         Haptics.tap()
         NSWorkspace.shared.open(url)
@@ -416,6 +492,10 @@ struct HistoryView: View {
     let actions: PanelActions
     @FocusState private var searchFocused: Bool
     @Namespace private var tabNamespace
+
+    @State private var showingNewSnippet = false
+    @State private var snippetTitle = ""
+    @State private var snippetText = ""
 
     var body: some View {
         let items = state.filtered(store.items)
@@ -499,6 +579,9 @@ struct HistoryView: View {
                     lineWidth: 1
                 )
         )
+        .popover(isPresented: $showingNewSnippet, arrowEdge: .top) {
+            newSnippetPopover
+        }
         .onChange(of: state.focusToken) { _, _ in searchFocused = true }
         .onChange(of: state.query) { _, _ in state.selection = 0 }
         .onAppear { searchFocused = true }
@@ -538,6 +621,24 @@ struct HistoryView: View {
             Spacer()
 
             Button {
+                showingNewSnippet = true
+            } label: {
+                Image(systemName: "plus.circle")
+                    .font(.system(size: 12.5))
+            }
+            .buttonStyle(.borderless)
+            .help("Create a new permanent snippet / template")
+
+            Button {
+                actions.mergeRecent()
+            } label: {
+                Image(systemName: "rectangle.stack.badge.plus")
+                    .font(.system(size: 12))
+            }
+            .buttonStyle(.borderless)
+            .help("Merge recent clips (top 3) into one combined clip")
+
+            Button {
                 actions.toggleQueue()
             } label: {
                 Image(systemName: queueManager.isActive ? "list.number" : "arrow.triangle.2.circlepath")
@@ -563,7 +664,7 @@ struct HistoryView: View {
                     .font(.system(size: 12.5))
             }
             .buttonStyle(.borderless)
-            .help("Clear history (keeps pinned items)")
+            .help("Clear history (keeps pinned items & snippets)")
 
             Button {
                 actions.openSettings(nil)
@@ -579,12 +680,51 @@ struct HistoryView: View {
         .padding(.bottom, 8)
     }
 
+    private var newSnippetPopover: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("New Snippet", systemImage: "bookmark.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                Spacer()
+                Button { showingNewSnippet = false } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+
+            TextField("Title (e.g. My Bio, Greeting, SQL Query)", text: $snippetTitle)
+                .textFieldStyle(.roundedBorder)
+
+            TextEditor(text: $snippetText)
+                .font(.system(size: 12, design: .monospaced))
+                .frame(height: 100)
+                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.primary.opacity(0.12), lineWidth: 1))
+
+            HStack {
+                Spacer()
+                Button("Cancel") { showingNewSnippet = false }
+                    .buttonStyle(.bordered)
+                Button("Save Snippet") {
+                    actions.createSnippet(snippetTitle, snippetText)
+                    snippetTitle = ""
+                    snippetText = ""
+                    showingNewSnippet = false
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(snippetText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(14)
+        .frame(width: 320)
+    }
+
     private var searchField: some View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
                 .font(.system(size: 12))
-            TextField("Search text, links, code, or words inside images…", text: $state.query)
+            TextField("Search text, snippets, links, code, or images…", text: $state.query)
                 .textFieldStyle(.plain)
                 .font(.system(size: 12.5))
                 .focused($searchFocused)
@@ -657,7 +797,7 @@ struct HistoryView: View {
                                 .overlay(
                                     Capsule()
                                         .strokeBorder(Color.white.opacity(0.28), lineWidth: 0.8)
-                                )
+                                 )
                                 .shadow(color: Color.accentColor.opacity(0.35), radius: 6, x: 0, y: 2)
                                 .matchedGeometryEffect(id: "liquidTab", in: tabNamespace)
                         }
@@ -684,8 +824,10 @@ struct HistoryView: View {
         switch filter {
         case .all:
             return store.items.count
+        case .snippets:
+            return store.items.filter { $0.isSnippetItem }.count
         case .text:
-            return store.items.filter { $0.kind == .text }.count
+            return store.items.filter { $0.kind == .text && !$0.isSnippetItem }.count
         case .images:
             return store.items.filter { $0.kind == .image || ($0.kind == .file && store.ocrURL(for: $0) != nil) }.count
         case .links:
@@ -759,6 +901,7 @@ struct ClipRow: View {
     @ObservedObject var state: PanelState
     let actions: PanelActions
     @State private var hovering = false
+    @State private var isRevealed = false
 
     private static let relative: RelativeDateTimeFormatter = {
         let f = RelativeDateTimeFormatter()
@@ -792,6 +935,12 @@ struct ClipRow: View {
             if canOCR {
                 Button("Extract Text (⌘E)") { actions.extractText(item) }
             }
+            Button(item.isSnippetItem ? "Remove from Snippets" : "Save as Snippet") {
+                actions.toggleSnippet(item)
+            }
+            Button("Merge Top 3 into One") {
+                actions.mergeRecent()
+            }
             Button(item.pinned ? "Unpin" : "Pin (⌘P)") { actions.togglePin(item) }
             if item.kind != .text { Button("Show in Finder") { actions.reveal(item) } }
             Divider()
@@ -809,9 +958,54 @@ struct ClipRow: View {
     private var content: some View {
         switch item.kind {
         case .text:
+            let textVal = item.text ?? ""
+            let sensitive = SmartText.detectSensitive(in: textVal)
+            let isMasked = (sensitive != nil) && Prefs.autoMaskSensitive && !isRevealed
+
             VStack(alignment: .leading, spacing: 4) {
+                // Sensitive badge if detected
+                if let sensitive {
+                    HStack(spacing: 5) {
+                        Image(systemName: "lock.shield.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.orange)
+                        Text(sensitive.type)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.orange)
+                        Spacer()
+                        Button {
+                            isRevealed.toggle()
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: isRevealed ? "eye.slash" : "eye")
+                                Text(isRevealed ? "Hide" : "Reveal")
+                            }
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.orange.opacity(0.12)))
+                }
+
+                // Snippet title badge
+                if item.isSnippetItem {
+                    HStack(spacing: 4) {
+                        Image(systemName: "bookmark.fill")
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(.purple)
+                        Text(item.snippetTitle ?? "Template")
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(.purple)
+                    }
+                    .padding(.horizontal, 6).padding(.vertical, 1.5)
+                    .background(Capsule().fill(Color.purple.opacity(0.12)))
+                }
+
                 // Color swatch header if it's a hex color
-                if let text = item.text, let col = SmartText.color(from: text) {
+                if let col = SmartText.color(from: textVal) {
                     HStack(spacing: 6) {
                         Circle()
                             .fill(Color(nsColor: col))
@@ -824,7 +1018,7 @@ struct ClipRow: View {
                     }
                 }
                 // URL indicator
-                if let text = item.text, let url = SmartText.url(from: text) {
+                if let url = SmartText.url(from: textVal) {
                     HStack(spacing: 5) {
                         Image(systemName: "link")
                             .font(.system(size: 10.5, weight: .medium))
@@ -835,8 +1029,8 @@ struct ClipRow: View {
                     }
                 }
                 // Main Text preview
-                Text(item.preview)
-                    .font(.system(size: 12.5, design: (item.text?.hasPrefix("{") == true) ? .monospaced : .default))
+                Text(isMasked ? (sensitive?.masked ?? item.preview) : item.preview)
+                    .font(.system(size: 12.5, design: (isMasked || item.text?.hasPrefix("{") == true) ? .monospaced : .default))
                     .lineLimit(4)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.trailing, 72)
@@ -887,6 +1081,16 @@ struct ClipRow: View {
                     .padding(.horizontal, 5).padding(.vertical, 1)
                     .background(Capsule().fill(Color.accentColor.opacity(0.18)))
             }
+            if let qr = item.qrPayload, !qr.isEmpty {
+                HStack(spacing: 3) {
+                    Image(systemName: "qrcode")
+                    Text("QR Code")
+                }
+                .font(.system(size: 9.5, weight: .semibold))
+                .padding(.horizontal, 5).padding(.vertical, 1)
+                .background(Capsule().fill(Color.blue.opacity(0.15)))
+                .foregroundStyle(Color.blue)
+            }
             if let text = item.text, SmartText.prettyJSON(from: text) != nil {
                 Text("{ } JSON")
                     .font(.system(size: 9.5, weight: .bold, design: .monospaced))
@@ -903,6 +1107,7 @@ struct ClipRow: View {
     }
 
     private var kindIcon: String {
+        if item.isSnippetItem { return "bookmark.fill" }
         switch item.kind {
         case .text:
             if let t = item.text, SmartText.url(from: t) != nil { return "link" }
@@ -923,6 +1128,9 @@ struct ClipRow: View {
             }
             if canOCR {
                 iconButton("text.viewfinder", help: "Extract text (⌘E)") { actions.extractText(item) }
+            }
+            iconButton(item.isSnippetItem ? "bookmark.slash" : "bookmark", help: item.isSnippetItem ? "Remove snippet" : "Save as snippet") {
+                actions.toggleSnippet(item)
             }
             iconButton(item.pinned ? "pin.slash" : "pin", help: "Pin (⌘P)") { actions.togglePin(item) }
             iconButton("trash", help: "Delete (⌘⌫)") { actions.delete(item) }
@@ -955,13 +1163,16 @@ struct QuickLookDrawer: View {
     let actions: PanelActions
     let onClose: () -> Void
 
+    @State private var showingQRCode = false
+    @State private var qrCodeImage: NSImage? = nil
+
     var body: some View {
         VStack(spacing: 0) {
             // Header bar
             HStack(spacing: 8) {
                 Image(systemName: "sparkles")
                     .foregroundStyle(Color.accentColor)
-                Text("Quick Look")
+                Text(item.isSnippetItem ? (item.snippetTitle ?? "Snippet") : "Quick Look")
                     .font(.system(size: 13, weight: .semibold))
 
                 if let text = item.text {
@@ -974,6 +1185,27 @@ struct QuickLookDrawer: View {
                 }
 
                 Spacer()
+
+                if item.text != nil {
+                    Button {
+                        withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+                            if qrCodeImage == nil, let text = item.text {
+                                qrCodeImage = SmartText.generateQRCode(from: text)
+                            }
+                            showingQRCode.toggle()
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "qrcode")
+                            Text(showingQRCode ? "Hide QR" : "QR Code")
+                        }
+                        .font(.system(size: 11, weight: .medium))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Capsule().fill(showingQRCode ? Color.accentColor.opacity(0.25) : Color.primary.opacity(0.06)))
+                    }
+                    .buttonStyle(.plain)
+                }
 
                 Button(action: onClose) {
                     Image(systemName: "xmark.circle.fill")
@@ -991,6 +1223,26 @@ struct QuickLookDrawer: View {
             // Content preview area
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
+                    // Generated QR Code View
+                    if showingQRCode, let qr = qrCodeImage {
+                        VStack(spacing: 8) {
+                            Image(nsImage: qr)
+                                .interpolation(.none)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 140, height: 140)
+                                .padding(10)
+                                .background(Color.white)
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .shadow(color: Color.black.opacity(0.2), radius: 10, y: 4)
+                            Text("Point iPhone / Android camera to scan")
+                                .font(.system(size: 10.5, weight: .medium))
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                    }
+
                     if let text = item.text {
                         // URL open button if applicable
                         if let url = SmartText.url(from: text) {
@@ -1030,6 +1282,23 @@ struct QuickLookDrawer: View {
                             .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.04)))
                         }
 
+                        // Sensitive data banner
+                        if let sensitive = SmartText.detectSensitive(in: text) {
+                            HStack {
+                                Image(systemName: "lock.shield.fill")
+                                    .foregroundStyle(.orange)
+                                Text("Contains \(sensitive.type)")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(.orange)
+                                Spacer()
+                                Text("Masked in quick preview")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(8)
+                            .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.12)))
+                        }
+
                         // Full readable text
                         Text(text)
                             .font(.system(size: 12, design: (item.text?.hasPrefix("{") == true) ? .monospaced : .default))
@@ -1046,6 +1315,38 @@ struct QuickLookDrawer: View {
                                 .frame(maxWidth: .infinity, maxHeight: 220)
                                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                         }
+
+                        // Scanned QR Payload inside image
+                        if let qr = item.qrPayload, !qr.isEmpty {
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack {
+                                    Image(systemName: "qrcode.viewfinder")
+                                        .foregroundStyle(Color.accentColor)
+                                    Text("Detected QR / Barcode")
+                                        .font(.system(size: 11.5, weight: .semibold))
+                                    Spacer()
+                                    Button("Copy Payload") {
+                                        actions.copyOnly(ClipItem(kind: .text, text: qr, hash: ""))
+                                    }
+                                    .font(.system(size: 10.5))
+                                    .buttonStyle(.borderless)
+                                    if let url = URL(string: qr), url.scheme != nil {
+                                        Button("Open Link") {
+                                            actions.openURL(url)
+                                        }
+                                        .font(.system(size: 10.5))
+                                        .buttonStyle(.borderless)
+                                    }
+                                }
+                                Text(qr)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .textSelection(.enabled)
+                                    .padding(8)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.accentColor.opacity(0.08)))
+                            }
+                        }
+
                         if let ocr = item.ocrText, !ocr.isEmpty {
                             VStack(alignment: .leading, spacing: 6) {
                                 HStack {
@@ -1078,6 +1379,9 @@ struct QuickLookDrawer: View {
             if let text = item.text {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
+                        transformPill(item.isSnippetItem ? "Unmark Snippet" : "Save as Snippet") {
+                            actions.toggleSnippet(item)
+                        }
                         transformPill("Plain Text") { actions.pastePlainText(item) }
                         transformPill("UPPERCASE") { actions.applyTransform(item, text.uppercased()) }
                         transformPill("lowercase") { actions.applyTransform(item, text.lowercased()) }
@@ -1100,6 +1404,25 @@ struct QuickLookDrawer: View {
                         transformPill("URL Decode") { actions.applyTransform(item, SmartText.urlDecode(text)) }
                         transformPill("Strip Markdown") { actions.applyTransform(item, SmartText.stripMarkdown(text)) }
                         transformPill("Strip HTML") { actions.applyTransform(item, SmartText.stripHTML(text)) }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                }
+                .background(Color.primary.opacity(0.02))
+            } else if store.ocrURL(for: item) != nil {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        Text("Optimize:")
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                        transformPill("Compress 75%") { actions.compressImage(item, 0.75, 1.0) }
+                        transformPill("Resize 50%") { actions.compressImage(item, 0.8, 0.5) }
+                        transformPill("Copy as PNG") { actions.convertImageToPNG(item) }
+                        if let ocr = item.ocrText, !ocr.isEmpty {
+                            transformPill("Copy Text (OCR)") {
+                                actions.copyOnly(ClipItem(kind: .text, text: ocr, hash: ""))
+                            }
+                        }
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
