@@ -7,6 +7,7 @@ enum ClipFilter: String, CaseIterable, Identifiable {
     case text = "Text"
     case images = "Images"
     case links = "Links"
+    case code = "Code"
     case pinned = "Pinned"
 
     var id: String { rawValue }
@@ -16,6 +17,7 @@ enum ClipFilter: String, CaseIterable, Identifiable {
         case .text: return "text.alignleft"
         case .images: return "photo"
         case .links: return "link"
+        case .code: return "chevron.left.forwardslash.chevron.right"
         case .pinned: return "pin.fill"
         }
     }
@@ -46,6 +48,13 @@ final class PanelState: ObservableObject {
                 guard item.kind == .text, let text = item.text else { return false }
                 return SmartText.url(from: text) != nil
             }
+        case .code:
+            list = list.filter { item in
+                guard item.kind == .text, let text = item.text else { return false }
+                if SmartText.prettyJSON(from: text) != nil { return true }
+                let codeKeywords = ["func ", "def ", "class ", "const ", "let ", "var ", "import ", "<?", "<html", "SELECT ", "git ", "npm ", "docker "]
+                return codeKeywords.contains { text.contains($0) }
+            }
         case .pinned:
             list = list.filter { $0.pinned }
         }
@@ -69,6 +78,7 @@ struct PanelActions {
     var clear: () -> Void
     var captureScreenText: () -> Void
     var openSettings: (NSView?) -> Void
+    var toggleQueue: () -> Void
 }
 
 /// A panel that can take keyboard focus without activating the app, so the
@@ -91,7 +101,7 @@ final class FloatingPanel: NSPanel {
         isOpaque = false
         hasShadow = true
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
-        minSize = NSSize(width: 360, height: 420)
+        minSize = NSSize(width: 370, height: 440)
         [.closeButton, .miniaturizeButton, .zoomButton].forEach { standardWindowButton($0)?.isHidden = true }
     }
 
@@ -107,6 +117,7 @@ final class FloatingPanel: NSPanel {
 @MainActor
 final class PanelController {
     let store: ClipboardStore
+    let queueManager = QueueManager.shared
     let state = PanelState()
     var onOpenSettings: ((NSView?) -> Void)?
     private var panel: FloatingPanel!
@@ -114,7 +125,7 @@ final class PanelController {
 
     init(store: ClipboardStore) {
         self.store = store
-        panel = FloatingPanel(size: NSSize(width: 410, height: 580))
+        panel = FloatingPanel(size: NSSize(width: 420, height: 600))
         panel.onResignKey = { [weak self] in self?.hide() }
 
         let actions = PanelActions(
@@ -129,7 +140,8 @@ final class PanelController {
             reveal: { [weak self] in self?.reveal($0) },
             clear: { [weak self] in self?.store.clearUnpinned() },
             captureScreenText: { ScreenTextCapture.start() },
-            openSettings: { [weak self] view in self?.onOpenSettings?(view) }
+            openSettings: { [weak self] view in self?.onOpenSettings?(view) },
+            toggleQueue: { [weak self] in self?.toggleQueueMode() }
         )
         panel.contentView = NSHostingView(rootView: HistoryView(store: store, state: state, actions: actions))
     }
@@ -372,6 +384,16 @@ final class PanelController {
         }
     }
 
+    private func toggleQueueMode() {
+        if queueManager.isActive {
+            queueManager.stopQueue()
+        } else {
+            let list = state.filtered(store.items)
+            let itemsToQueue = Array(list.prefix(5).reversed())
+            queueManager.startQueue(with: itemsToQueue)
+        }
+    }
+
     private func openURL(_ url: URL) {
         Haptics.tap()
         NSWorkspace.shared.open(url)
@@ -390,6 +412,7 @@ final class PanelController {
 struct HistoryView: View {
     @ObservedObject var store: ClipboardStore
     @ObservedObject var state: PanelState
+    @ObservedObject private var queueManager = QueueManager.shared
     let actions: PanelActions
     @FocusState private var searchFocused: Bool
     @Namespace private var tabNamespace
@@ -493,7 +516,36 @@ struct HistoryView: View {
                 .padding(.horizontal, 6).padding(.vertical, 1.5)
                 .background(Capsule().fill(Color.primary.opacity(0.08)))
 
+            if queueManager.isActive {
+                HStack(spacing: 4) {
+                    Circle().fill(Color.green).frame(width: 6, height: 6)
+                    Text("Queue: \(queueManager.currentIndex + 1)/\(queueManager.queue.count)")
+                        .font(.system(size: 10.5, weight: .semibold))
+                    Button {
+                        queueManager.stopQueue()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 8, weight: .bold))
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2.5)
+                .background(Capsule().fill(Color.green.opacity(0.18)))
+                .foregroundStyle(Color.green)
+            }
+
             Spacer()
+
+            Button {
+                actions.toggleQueue()
+            } label: {
+                Image(systemName: queueManager.isActive ? "list.number" : "arrow.triangle.2.circlepath")
+                    .font(.system(size: 12))
+                    .foregroundStyle(queueManager.isActive ? Color.green : Color.primary)
+            }
+            .buttonStyle(.borderless)
+            .help(queueManager.isActive ? "Stop Sequential Queue" : "Start Sequential Queue (⌥⌘V to paste next)")
 
             Button {
                 actions.captureScreenText()
@@ -532,7 +584,7 @@ struct HistoryView: View {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
                 .font(.system(size: 12))
-            TextField("Search text, links, or text inside images…", text: $state.query)
+            TextField("Search text, links, code, or words inside images…", text: $state.query)
                 .textFieldStyle(.plain)
                 .font(.system(size: 12.5))
                 .focused($searchFocused)
@@ -574,15 +626,15 @@ struct HistoryView: View {
                         state.selection = 0
                     }
                 } label: {
-                    HStack(spacing: 4) {
+                    HStack(spacing: 3.5) {
                         Image(systemName: filter.icon)
-                            .font(.system(size: 10, weight: isSelected ? .semibold : .regular))
+                            .font(.system(size: 9.5, weight: isSelected ? .semibold : .regular))
                         Text(filter.rawValue)
-                            .font(.system(size: 11.5, weight: isSelected ? .semibold : .medium))
+                            .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
                         if count > 0 && filter != .all {
                             Text("\(count)")
-                                .font(.system(size: 9.5, weight: .bold))
-                                .padding(.horizontal, 4)
+                                .font(.system(size: 9, weight: .bold))
+                                .padding(.horizontal, 3.5)
                                 .padding(.vertical, 0.5)
                                 .background(
                                     Capsule()
@@ -590,7 +642,7 @@ struct HistoryView: View {
                                 )
                         }
                     }
-                    .padding(.horizontal, 9)
+                    .padding(.horizontal, 7.5)
                     .padding(.vertical, 5)
                     .foregroundStyle(isSelected ? Color.white : Color.primary.opacity(0.75))
                     .background {
@@ -641,6 +693,13 @@ struct HistoryView: View {
                 guard item.kind == .text, let text = item.text else { return false }
                 return SmartText.url(from: text) != nil
             }.count
+        case .code:
+            return store.items.filter { item in
+                guard item.kind == .text, let text = item.text else { return false }
+                if SmartText.prettyJSON(from: text) != nil { return true }
+                let codeKeywords = ["func ", "def ", "class ", "const ", "let ", "var ", "import ", "<?", "<html", "SELECT ", "git ", "npm ", "docker "]
+                return codeKeywords.contains { text.contains($0) }
+            }.count
         case .pinned:
             return store.items.filter { $0.pinned }.count
         }
@@ -669,6 +728,7 @@ struct HistoryView: View {
             hint("↩", "paste")
             hint("⇧↩", "plain")
             hint("Space", "preview")
+            hint("⌥⌘V", "queue")
             hint("⌘E", "OCR")
             hint("⌘P", "pin")
             Spacer()
@@ -1024,9 +1084,22 @@ struct QuickLookDrawer: View {
                         transformPill("Title Case") { actions.applyTransform(item, text.capitalized) }
                         transformPill("camelCase") { actions.applyTransform(item, SmartText.toCamelCase(text)) }
                         transformPill("snake_case") { actions.applyTransform(item, SmartText.toSnakeCase(text)) }
+                        transformPill("kebab-case") { actions.applyTransform(item, SmartText.toKebabCase(text)) }
                         if let pretty = SmartText.prettyJSON(from: text) {
                             transformPill("Beautify JSON") { actions.applyTransform(item, pretty) }
                         }
+                        if let min = SmartText.minifyJSON(from: text) {
+                            transformPill("Minify JSON") { actions.applyTransform(item, min) }
+                        }
+                        if SmartText.isBase64(text), let decoded = SmartText.fromBase64(text) {
+                            transformPill("Base64 Decode") { actions.applyTransform(item, decoded) }
+                        } else {
+                            transformPill("Base64 Encode") { actions.applyTransform(item, SmartText.toBase64(text)) }
+                        }
+                        transformPill("URL Encode") { actions.applyTransform(item, SmartText.urlEncode(text)) }
+                        transformPill("URL Decode") { actions.applyTransform(item, SmartText.urlDecode(text)) }
+                        transformPill("Strip Markdown") { actions.applyTransform(item, SmartText.stripMarkdown(text)) }
+                        transformPill("Strip HTML") { actions.applyTransform(item, SmartText.stripHTML(text)) }
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
@@ -1062,7 +1135,7 @@ struct QuickLookDrawer: View {
             .padding(.vertical, 10)
             .background(Color.primary.opacity(0.04))
         }
-        .frame(maxWidth: .infinity, maxHeight: 360)
+        .frame(maxWidth: .infinity, maxHeight: 370)
         .background(
             ZStack {
                 VisualEffect(material: .popover)

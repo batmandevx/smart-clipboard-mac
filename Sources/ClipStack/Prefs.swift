@@ -69,5 +69,8 @@ struct HotkeyPreset {
 
     /// Fixed hotkey for "extract text from a screen region".
     static let textCapture = HotkeyPreset(title: "⌘⇧2", keyCode: UInt32(kVK_ANSI_2), modifiers: UInt32(cmdKey | shiftKey))
+
+    /// Fixed hotkey for "Paste next in Sequential Queue".
+    static let queuePaste = HotkeyPreset(title: "⌥⌘V", keyCode: UInt32(kVK_ANSI_V), modifiers: UInt32(optionKey | cmdKey))
 }
 

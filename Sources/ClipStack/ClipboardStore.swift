@@ -244,6 +244,32 @@ final class ClipboardStore: ObservableObject {
         save()
     }
 
+    // MARK: - Export
+
+    func exportHistory(to destinationURL: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(items)
+        try data.write(to: destinationURL)
+    }
+
+    func exportAsMarkdown(to destinationURL: URL) throws {
+        var lines: [String] = ["# ClipStack Clipboard Export", "Date: \(Date().formatted())", "Total items: \(items.count)", ""]
+        for (i, item) in items.enumerated() {
+            let title = item.source != nil ? "[\(item.source!)]" : "[\(item.kind.rawValue.uppercased())]"
+            lines.append("### \(i + 1). \(title) - \(item.date.formatted())")
+            if let text = item.text {
+                lines.append("```\n\(text)\n```")
+            } else if let ocr = item.ocrText, !ocr.isEmpty {
+                lines.append("**Extracted Text (OCR):**\n```\n\(ocr)\n```")
+            } else if let paths = item.filePaths {
+                lines.append("**Files:**\n" + paths.map { "- \($0)" }.joined(separator: "\n"))
+            }
+            lines.append("")
+        }
+        try lines.joined(separator: "\n").write(to: destinationURL, atomically: true, encoding: .utf8)
+    }
+
     // MARK: - OCR
 
     /// Image URL usable for OCR (clipboard images or a single copied image file).

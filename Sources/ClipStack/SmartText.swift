@@ -61,7 +61,21 @@ enum SmartText {
         return result
     }
 
-    /// Word and character stats
+    /// Minifies JSON
+    static func minifyJSON(from text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (trimmed.hasPrefix("{") && trimmed.hasSuffix("}")) ||
+              (trimmed.hasPrefix("[") && trimmed.hasSuffix("]")),
+              let data = trimmed.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data, options: []),
+              let minData = try? JSONSerialization.data(withJSONObject: json, options: []),
+              let result = String(data: minData, encoding: .utf8) else {
+            return nil
+        }
+        return result
+    }
+
+    /// Word, character, and line stats
     static func stats(for text: String) -> (words: Int, chars: Int, lines: Int) {
         let chars = text.count
         let words = text.split { $0.isWhitespace || $0.isNewline }.count
@@ -84,5 +98,57 @@ enum SmartText {
     static func toKebabCase(_ text: String) -> String {
         let words = text.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
         return words.map { $0.lowercased() }.joined(separator: "-")
+    }
+
+    /// Base64 detection and conversions
+    static func isBase64(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 4, trimmed.count % 4 == 0,
+              let data = Data(base64Encoded: trimmed),
+              let decoded = String(data: data, encoding: .utf8),
+              !decoded.isEmpty else { return false }
+        return true
+    }
+
+    static func toBase64(_ text: String) -> String {
+        Data(text.utf8).base64EncodedString()
+    }
+
+    static func fromBase64(_ text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let data = Data(base64Encoded: trimmed),
+              let decoded = String(data: data, encoding: .utf8) else { return nil }
+        return decoded
+    }
+
+    /// URL encoding/decoding
+    static func urlEncode(_ text: String) -> String {
+        text.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? text
+    }
+
+    static func urlDecode(_ text: String) -> String {
+        text.removingPercentEncoding ?? text
+    }
+
+    /// Strip HTML tags
+    static func stripHTML(_ text: String) -> String {
+        text.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+    }
+
+    /// Strip Markdown styling
+    static func stripMarkdown(_ text: String) -> String {
+        var result = text
+        // Remove code blocks
+        result = result.replacingOccurrences(of: "```[a-zA-Z]*\\n", with: "", options: .regularExpression)
+        result = result.replacingOccurrences(of: "```", with: "")
+        result = result.replacingOccurrences(of: "`([^`]+)`", with: "$1", options: .regularExpression)
+        // Remove headers
+        result = result.replacingOccurrences(of: "^#{1,6}\\s+", with: "", options: .regularExpression)
+        // Remove bold/italics
+        result = result.replacingOccurrences(of: "(\\*\\*|__)(.*?)\\1", with: "$2", options: .regularExpression)
+        result = result.replacingOccurrences(of: "(\\*|_)(.*?)\\1", with: "$2", options: .regularExpression)
+        // Remove links [title](url) -> title
+        result = result.replacingOccurrences(of: "\\[([^\\]]+)\\]\\([^\\)]+\\)", with: "$1", options: .regularExpression)
+        return result
     }
 }

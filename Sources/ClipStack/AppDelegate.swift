@@ -4,10 +4,12 @@ import ServiceManagement
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let store = ClipboardStore.shared
+    private let queueManager = QueueManager.shared
     private var panel: PanelController!
     private var statusItem: NSStatusItem!
     private var historyHotKey: HotKey?
     private var textHotKey: HotKey?
+    private var queueHotKey: HotKey?
     private let screenshots = ScreenshotWatcher()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -80,6 +82,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let t = HotkeyPreset.textCapture
             textHotKey = HotKey(keyCode: t.keyCode, modifiers: t.modifiers) { ScreenTextCapture.start() }
         }
+
+        if queueHotKey == nil {
+            let q = HotkeyPreset.queuePaste
+            queueHotKey = HotKey(keyCode: q.keyCode, modifiers: q.modifiers) { [weak self] in
+                if self?.queueManager.isActive == true {
+                    self?.queueManager.pasteNext()
+                } else {
+                    HUD.show("Queue mode not active", symbol: "list.number")
+                }
+            }
+        }
     }
 
     // MARK: - Screenshots
@@ -96,11 +109,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(item("Open Clipboard History", key: HotkeyPreset.current.title, action: #selector(openHistory)))
         menu.addItem(item("Extract Text from Screen…", key: HotkeyPreset.textCapture.title, action: #selector(captureText)))
+
+        if queueManager.isActive {
+            menu.addItem(item("Paste Next in Queue (\(queueManager.currentIndex + 1)/\(queueManager.queue.count))",
+                              key: HotkeyPreset.queuePaste.title, action: #selector(pasteNextQueue)))
+            menu.addItem(item("Stop Queue Mode", action: #selector(toggleQueueMode)))
+        } else {
+            menu.addItem(item("Start Sequential Queue (Recent 5)", action: #selector(toggleQueueMode)))
+        }
+
         menu.addItem(.separator())
 
         // History size
         let sizeMenu = NSMenu()
-        for n in [20, 50, 100, 200] {
+        for n in [20, 50, 100, 200, 500] {
             let mi = item("\(n) items", action: #selector(setLimit(_:)))
             mi.tag = n
             mi.state = Prefs.historyLimit == n ? .on : .off
@@ -142,6 +164,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(login)
 
         menu.addItem(.separator())
+
+        // Export submenu
+        let exportMenu = NSMenu()
+        exportMenu.addItem(item("Export as Markdown (.md)…", action: #selector(exportMarkdown)))
+        exportMenu.addItem(item("Export as JSON (.json)…", action: #selector(exportJSON)))
+        let exportItem = NSMenuItem(title: "Export History", action: nil, keyEquivalent: "")
+        exportItem.submenu = exportMenu
+        menu.addItem(exportItem)
+
         menu.addItem(item("Clear History (keeps pinned)", action: #selector(clearHistory)))
         menu.addItem(item("Quit ClipStack", key: "q", action: #selector(quit)))
     }
@@ -161,6 +192,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func captureText() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { ScreenTextCapture.start() }
+    }
+
+    @objc private func toggleQueueMode() {
+        if queueManager.isActive {
+            queueManager.stopQueue()
+        } else {
+            let top5 = Array(store.items.prefix(5).reversed()) // FIFO
+            queueManager.startQueue(with: top5)
+        }
+    }
+
+    @objc private func pasteNextQueue() {
+        queueManager.pasteNext()
+    }
+
+    @objc private func exportMarkdown() {
+        promptExport(asMarkdown: true)
+    }
+
+    @objc private func exportJSON() {
+        promptExport(asMarkdown: false)
+    }
+
+    private func promptExport(asMarkdown: Bool) {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = asMarkdown ? "ClipStack-Export.md" : "ClipStack-Export.json"
+        panel.begin { [weak self] res in
+            guard res == .OK, let url = panel.url, let self else { return }
+            do {
+                if asMarkdown {
+                    try self.store.exportAsMarkdown(to: url)
+                } else {
+                    try self.store.exportHistory(to: url)
+                }
+                HUD.show("Exported history!", symbol: "square.and.arrow.up.fill")
+            } catch {
+                HUD.show("Export failed", symbol: "exclamationmark.triangle")
+            }
+        }
     }
 
     @objc private func setLimit(_ sender: NSMenuItem) {
