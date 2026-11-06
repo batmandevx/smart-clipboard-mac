@@ -95,6 +95,11 @@ Press **`Space`** on any item to slide open the integrated **Liquid Glass Quick 
 ### 11. Export & Backup
 - Export your entire clipboard history anytime as formatted **Markdown (`.md`)** or **JSON (`.json`)**.
 
+### 12. Built-in Window Switcher (`⌥Tab`)
+- Hold **`⌥`** and tap **`Tab`** to see every window on the current Space as a live thumbnail grid; release **`⌥`** to jump to it. A quick tap switches straight to your previous window without showing the grid.
+- **`⇧⇥`** goes back, arrow keys and mouse hover work too, and **`W`** / **`M`** / **`Q`** close, minimize, or quit the selected window's app. **`Esc`** cancels.
+- Written from scratch with ScreenCaptureKit + Accessibility. No separate app (or premium upsell) required. Turn it off from the menu bar: **Window Switcher**.
+
 ---
 
 ## 📊 Feature Comparison
@@ -213,6 +218,8 @@ sequenceDiagram
 | :--- | :--- |
 | **`⌘⇧V`** | Toggle ClipStack Clipboard History popup (customizable: `⌥V`, `⌃⌥V`, etc.) |
 | **`⌘⇧2`** | Interactive Screen Text Extractor (drag region & OCR to clipboard) |
+| **`⌥⇥`** (hold `⌥`) | Window Switcher: cycle windows, release `⌥` to switch (`⇧⇥` back, `W` close, `M` minimize, `Q` quit, `Esc` cancel) |
+| **`⇥` / `⇧⇥`** (in history) | Next / previous filter tab |
 | **`⌥⌘V`** | Paste next item in Sequential Queue Mode |
 | **`Space`** | **Toggle Quick Look preview drawer, QR code, image compression & text tools** |
 | **`↩ (Return)`** | Paste selected item into active application |
@@ -233,7 +240,7 @@ Clone the repository and run the build script:
 ```bash
 git clone https://github.com/batmandevx/smart-clipboard-mac.git
 cd smart-clipboard-mac
-chmod +x build.sh
+./scripts/make-signing-cert.sh   # once: stable local signing so permissions survive rebuilds
 ./build.sh install
 ```
 This compiles the release binary, signs it, installs it into `/Applications/ClipStack.app`, and launches it immediately.
@@ -252,7 +259,11 @@ open build/ClipStack.app
 - **Accessibility Permission (for Auto-Paste)**:
   To allow ClipStack to simulate `⌘V` when you select an item, enable Accessibility in:  
   **System Settings → Privacy & Security → Accessibility → ClipStack**  
-  *(If disabled, ClipStack will still copy the item and show a prompt to press `⌘V`).*
+  *(If disabled, ClipStack will still copy the item and show a prompt to press `⌘V`).*  
+  The Window Switcher also uses this to bring the exact window you picked to the front.
+- **Screen Recording (for the Text Extractor & switcher thumbnails)**:
+  **System Settings → Privacy & Security → Screen & System Audio Recording → ClipStack**, then relaunch ClipStack (macOS only applies it after a restart; ClipStack offers a one-click relaunch).  
+  Run `./scripts/make-signing-cert.sh` once before building. Without it every rebuild gets a new ad-hoc signature and macOS silently drops this permission.
 - **Launch at Login**:
   To have ClipStack start automatically when your Mac turns on:
   Right-click the menu bar icon (or click the ⚙️ gear icon) and verify **Launch at Login** is checked.

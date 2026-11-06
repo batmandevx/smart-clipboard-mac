@@ -28,6 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         registerHotKeys()
+        WindowSwitcher.shared.setEnabled(Prefs.windowSwitcher)
 
         screenshots.onScreenshot = { [weak self] url in self?.handleScreenshot(url) }
         if Prefs.watchScreenshots { screenshots.start() }
@@ -163,6 +164,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
         menu.addItem(login)
 
+        let switcher = item("Window Switcher    ⌥⇥", action: #selector(toggleWindowSwitcher))
+        switcher.state = Prefs.windowSwitcher ? .on : .off
+        menu.addItem(switcher)
+
         let sound = item("Audio Feedback on Copy/Paste", action: #selector(toggleSoundFeedback))
         sound.state = Prefs.soundFeedback ? .on : .off
         menu.addItem(sound)
@@ -271,6 +276,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if Prefs.soundFeedback {
             SoundEffects.playPaste()
         }
+    }
+
+    @objc private func toggleWindowSwitcher() {
+        Prefs.windowSwitcher.toggle()
+        WindowSwitcher.shared.setEnabled(Prefs.windowSwitcher)
+        HUD.show(Prefs.windowSwitcher ? "Window Switcher on — hold ⌥, tap Tab" : "Window Switcher off",
+                 symbol: "macwindow.on.rectangle")
     }
 
     @objc private func toggleMaskSensitive() {

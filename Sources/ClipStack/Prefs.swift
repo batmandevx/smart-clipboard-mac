@@ -53,6 +53,12 @@ enum Prefs {
         set { d.set(newValue, forKey: "autoMaskSensitive") }
     }
 
+    /// Built-in ⌥Tab window switcher.
+    static var windowSwitcher: Bool {
+        get { bool("windowSwitcher", default: true) }
+        set { d.set(newValue, forKey: "windowSwitcher") }
+    }
+
     static var didShowWelcome: Bool {
         get { bool("didShowWelcome", default: false) }
         set { d.set(newValue, forKey: "didShowWelcome") }
