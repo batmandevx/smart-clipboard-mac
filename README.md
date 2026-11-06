@@ -95,10 +95,18 @@ Press **`Space`** on any item to slide open the integrated **Liquid Glass Quick 
 ### 11. Export & Backup
 - Export your entire clipboard history anytime as formatted **Markdown (`.md`)** or **JSON (`.json`)**.
 
-### 12. Built-in Window Switcher (`⌥Tab`)
-- Hold **`⌥`** and tap **`Tab`** to see every window on the current Space as a live thumbnail grid; release **`⌥`** to jump to it. A quick tap switches straight to your previous window without showing the grid.
-- **`⇧⇥`** goes back, arrow keys and mouse hover work too, and **`W`** / **`M`** / **`Q`** close, minimize, or quit the selected window's app. **`Esc`** cancels.
-- Written from scratch with ScreenCaptureKit + Accessibility. No separate app (or premium upsell) required. Turn it off from the menu bar: **Window Switcher**.
+### 12. Built-in Window Switcher (`⌥Tab`), AltTab-style
+- **Hold `⌥` + tap `Tab`** to see every window as a live thumbnail grid; release `⌥` to jump to it. A quick tap goes straight to the previous window with no flash.
+- **`⌥` + `` ` ``** shows only the current app's windows.
+- **Every Space, including full-screen apps**, plus minimized windows, windows of hidden apps and (optionally) apps with no open windows. Picking a window on another Space switches you there.
+- **In-switcher keys:** `⇥`/`⇧⇥`, arrows (grid navigation), `↩`/`Space` select, `W` close, `M` minimize/restore, `F` full screen, `H` hide/unhide app, `Q` quit app, `Esc` cancel. Hover shows close/minimize/full-screen buttons; click to switch.
+- **Preview** of the selected window drawn at its real position on screen; Space-number and minimized/hidden/full-screen badges.
+- **Settings** (menu bar → Window Switcher → Settings…):
+  - **Controls:** hold key `⌥` / `⌃` / `⌘` (`⌘` replaces the system `⌘Tab`); per-shortcut apps / Spaces / screens scope; show delay; hover-to-select; cursor follows focus.
+  - **Appearance:** Thumbnails / App Icons / Titles styles; small / medium / large; which screen to show on.
+  - **Filters:** minimized, hidden, full-screen and windowless toggles; sort by recently used, app name, title or Space.
+  - **Exclusions:** hide an app's windows, or let an app keep the shortcut (games, VMs, remote desktop).
+- Written from scratch: Accessibility + ScreenCaptureKit + the window-server calls macOS switchers use for Spaces. Needs **Accessibility** (and **Screen Recording** for thumbnails/titles).
 
 ---
 
@@ -218,7 +226,8 @@ sequenceDiagram
 | :--- | :--- |
 | **`⌘⇧V`** | Toggle ClipStack Clipboard History popup (customizable: `⌥V`, `⌃⌥V`, etc.) |
 | **`⌘⇧2`** | Interactive Screen Text Extractor (drag region & OCR to clipboard) |
-| **`⌥⇥`** (hold `⌥`) | Window Switcher: cycle windows, release `⌥` to switch (`⇧⇥` back, `W` close, `M` minimize, `Q` quit, `Esc` cancel) |
+| **`⌥⇥`** (hold `⌥`) | Window Switcher: all windows; release `⌥` to switch (`⇧⇥` back, `W` close, `M` minimize, `F` full screen, `H` hide, `Q` quit, `Esc` cancel) |
+| **`` ⌥` ``** (hold `⌥`) | Window Switcher: current app's windows only |
 | **`⇥` / `⇧⇥`** (in history) | Next / previous filter tab |
 | **`⌥⌘V`** | Paste next item in Sequential Queue Mode |
 | **`Space`** | **Toggle Quick Look preview drawer, QR code, image compression & text tools** |

@@ -164,9 +164,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
         menu.addItem(login)
 
-        let switcher = item("Window Switcher    ⌥⇥", action: #selector(toggleWindowSwitcher))
-        switcher.state = Prefs.windowSwitcher ? .on : .off
-        menu.addItem(switcher)
+        let switcherMenu = NSMenu()
+        let sOn = item("Enabled", action: #selector(toggleWindowSwitcher))
+        sOn.state = Prefs.windowSwitcher ? .on : .off
+        switcherMenu.addItem(sOn)
+        switcherMenu.addItem(item("Settings…", action: #selector(openSwitcherSettings)))
+        let switcherItem = NSMenuItem(title: "Window Switcher    \(SwitcherSettings.shared.holdModifier.symbol)⇥",
+                                      action: nil, keyEquivalent: "")
+        switcherItem.submenu = switcherMenu
+        menu.addItem(switcherItem)
 
         let sound = item("Audio Feedback on Copy/Paste", action: #selector(toggleSoundFeedback))
         sound.state = Prefs.soundFeedback ? .on : .off
@@ -281,8 +287,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func toggleWindowSwitcher() {
         Prefs.windowSwitcher.toggle()
         WindowSwitcher.shared.setEnabled(Prefs.windowSwitcher)
-        HUD.show(Prefs.windowSwitcher ? "Window Switcher on — hold ⌥, tap Tab" : "Window Switcher off",
+        let hold = SwitcherSettings.shared.holdModifier.symbol
+        HUD.show(Prefs.windowSwitcher ? "Window Switcher on: hold \(hold), tap Tab" : "Window Switcher off",
                  symbol: "macwindow.on.rectangle")
+    }
+
+    @objc private func openSwitcherSettings() {
+        SwitcherSettingsWindow.show()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        WindowSwitcher.shared.shutdown() // give ⌘Tab back to macOS if we took it over
     }
 
     @objc private func toggleMaskSensitive() {
