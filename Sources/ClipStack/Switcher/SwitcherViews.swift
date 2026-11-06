@@ -40,6 +40,13 @@ struct SwitcherView: View {
         let columns = Array(repeating: GridItem(.fixed(w), spacing: SwitcherLayout.spacing), count: perRow)
 
         VStack(spacing: 10) {
+            if state.searching { searchBar(width: CGFloat(perRow) * (w + SwitcherLayout.spacing) - SwitcherLayout.spacing) }
+            if state.windows.isEmpty {
+                Text("No windows match “\(state.query)”")
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .frame(width: max(w, 260), height: 60)
+            }
             ScrollViewReader { proxy in
                 ScrollView(.vertical, showsIndicators: false) {
                     LazyVGrid(columns: columns, spacing: style == .titles ? 2 : SwitcherLayout.spacing) {
@@ -92,9 +99,26 @@ struct SwitcherView: View {
         }
     }
 
+    private func searchBar(width: CGFloat) -> some View {
+        HStack(spacing: 7) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            Text(state.query.isEmpty ? "Type to filter windows…" : state.query)
+                .foregroundStyle(state.query.isEmpty ? .secondary : .primary)
+                .lineLimit(1)
+            Rectangle().fill(Color.accentColor).frame(width: 1.5, height: 15) // caret
+            Spacer(minLength: 0)
+            Text("\(state.windows.count)").monospacedDigit().foregroundStyle(.secondary)
+        }
+        .font(.system(size: 13))
+        .padding(.horizontal, 11)
+        .frame(width: max(width, 260), height: 32)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.primary.opacity(0.07)))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.accentColor.opacity(0.5), lineWidth: 1))
+    }
+
     private var legend: some View {
         HStack(spacing: 12) {
-            key("⇥", "Next"); key("⇧⇥", "Back"); key("W", "Close"); key("M", "Minimize")
+            key("⇥", "Next"); key("⇧⇥", "Back"); key("/", "Search"); key("W", "Close"); key("M", "Minimize")
             key("F", "Full Screen"); key("H", "Hide"); key("Q", "Quit"); key("esc", "Cancel")
         }
         .font(.system(size: 10))

@@ -8,6 +8,8 @@ final class SwitcherState: ObservableObject {
     @Published var windows: [SwitcherWindow] = []
     @Published var selection = 0
     @Published var thumbnails: [CGWindowID: NSImage] = [:]
+    @Published var query = ""
+    @Published var searching = false
     var perRow = 1
 }
 
@@ -38,6 +40,8 @@ final class WindowSwitcher {
     private var thumbCache: [CGWindowID: NSImage] = [:]
     private var mouseAtOpen: NSPoint = .zero
     private var targetScreen: NSScreen?
+    /// Full list for the current shortcut; `state.windows` is this list filtered by the search query.
+    private var allWindows: [SwitcherWindow] = []
 
     private init() {}
 
@@ -141,7 +145,8 @@ final class WindowSwitcher {
 
         switch type {
         case .flagsChanged:
-            if isOpen && !holdDown { commit() }
+            // While searching you can let go of the modifier and type freely; Return selects.
+            if isOpen && !holdDown && !state.searching { commit() }
             return false
 
         case .keyDown:
@@ -161,7 +166,7 @@ final class WindowSwitcher {
                 return true
             }
             guard isOpen else { return false }
-            handleKeyWhileOpen(key, shift: flags.contains(.maskShift))
+            handleKeyWhileOpen(key, shift: flags.contains(.maskShift), event: event)
             return true
 
         case .keyUp:
@@ -172,8 +177,30 @@ final class WindowSwitcher {
         }
     }
 
-    private func handleKeyWhileOpen(_ key: Int, shift: Bool) {
+    private func handleKeyWhileOpen(_ key: Int, shift: Bool, event: CGEvent) {
+        if state.searching {
+            switch key {
+            case kVK_Escape:
+                state.query.isEmpty ? endSearch() : setQuery("")
+            case kVK_Delete:
+                if state.query.isEmpty { endSearch() } else { setQuery(String(state.query.dropLast())) }
+            case kVK_Return, kVK_ANSI_KeypadEnter: commit()
+            case kVK_Tab: move(by: shift ? -1 : 1)
+            case kVK_RightArrow: move(by: 1)
+            case kVK_LeftArrow: move(by: -1)
+            case kVK_DownArrow: move(by: state.perRow)
+            case kVK_UpArrow: move(by: -state.perRow)
+            default:
+                // Ignore modifiers so typing while still holding ⌥ gives "a", not "å".
+                if let chars = NSEvent(cgEvent: event)?.charactersIgnoringModifiers,
+                   !chars.isEmpty, chars.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }) {
+                    setQuery(state.query + chars)
+                }
+            }
+            return
+        }
         switch key {
+        case kVK_ANSI_Slash: beginSearch()
         case kVK_Escape: close()
         case kVK_Return, kVK_ANSI_KeypadEnter, kVK_Space: commit()
         case kVK_RightArrow: move(by: 1)
@@ -233,6 +260,9 @@ final class WindowSwitcher {
         }
         isOpen = true
         activeShortcut = shortcut
+        allWindows = windows
+        state.query = ""
+        state.searching = false
         state.windows = windows
         state.thumbnails = thumbCache
         // In recently-used order, index 0 is the window you're in, so start on the previous one.
@@ -271,6 +301,35 @@ final class WindowSwitcher {
         let target = state.windows.indices.contains(state.selection) ? state.windows[state.selection] : nil
         close()
         if let target { focus(target) }
+    }
+
+    // MARK: - Search (press / while the switcher is open)
+
+    private func beginSearch() {
+        state.searching = true
+        if panel?.isVisible != true { showWork?.cancel(); showPanel() } else { layoutPanel() }
+    }
+
+    private func endSearch() {
+        state.searching = false
+        setQuery("")
+    }
+
+    private func setQuery(_ q: String) {
+        state.query = q
+        let selectedID = state.windows.indices.contains(state.selection) ? state.windows[state.selection].id : nil
+        let tokens = q.lowercased().split(separator: " ").map(String.init)
+        state.windows = tokens.isEmpty ? allWindows : allWindows.filter { w in
+            let hay = (w.title + " " + w.appName).lowercased()
+            return tokens.allSatisfy { hay.contains($0) }
+        }
+        if tokens.isEmpty, let selectedID, let i = state.windows.firstIndex(where: { $0.id == selectedID }) {
+            state.selection = i
+        } else {
+            state.selection = 0
+        }
+        layoutPanel()
+        updatePreview()
     }
 
     private func close() {
@@ -354,8 +413,9 @@ final class WindowSwitcher {
     }
 
     private func removeEntries(where predicate: (SwitcherWindow) -> Bool) {
+        allWindows.removeAll(where: predicate)
         withAnimation(.spring(response: 0.25, dampingFraction: 0.9)) { state.windows.removeAll(where: predicate) }
-        if state.windows.isEmpty { close(); return }
+        if allWindows.isEmpty { close(); return }
         state.selection = min(state.selection, state.windows.count - 1)
         layoutPanel()
         updatePreview()
@@ -365,7 +425,10 @@ final class WindowSwitcher {
         guard isOpen else { return }
         let windows = discover(shortcut: activeShortcut)
         guard !windows.isEmpty else { close(); return }
+        allWindows = windows
+        let q = state.query
         state.windows = windows
+        if !q.isEmpty { setQuery(q) }
         state.selection = windows.firstIndex { $0.id == id } ?? min(state.selection, windows.count - 1)
         layoutPanel()
         updatePreview()

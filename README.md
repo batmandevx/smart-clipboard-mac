@@ -99,6 +99,7 @@ Press **`Space`** on any item to slide open the integrated **Liquid Glass Quick 
 - **Hold `⌥` + tap `Tab`** to see every window as a live thumbnail grid; release `⌥` to jump to it. A quick tap goes straight to the previous window with no flash.
 - **`⌥` + `` ` ``** shows only the current app's windows.
 - **Every Space, including full-screen apps**, plus minimized windows, windows of hidden apps and (optionally) apps with no open windows. Picking a window on another Space switches you there.
+- **Type to search:** press `/` while the switcher is open and type part of a window title or app name. You can let go of `⌥` while typing; `↩` switches, `Esc` clears the search.
 - **In-switcher keys:** `⇥`/`⇧⇥`, arrows (grid navigation), `↩`/`Space` select, `W` close, `M` minimize/restore, `F` full screen, `H` hide/unhide app, `Q` quit app, `Esc` cancel. Hover shows close/minimize/full-screen buttons; click to switch.
 - **Preview** of the selected window drawn at its real position on screen; Space-number and minimized/hidden/full-screen badges.
 - **Settings** (menu bar → Window Switcher → Settings…):
@@ -228,6 +229,7 @@ sequenceDiagram
 | **`⌘⇧2`** | Interactive Screen Text Extractor (drag region & OCR to clipboard) |
 | **`⌥⇥`** (hold `⌥`) | Window Switcher: all windows; release `⌥` to switch (`⇧⇥` back, `W` close, `M` minimize, `F` full screen, `H` hide, `Q` quit, `Esc` cancel) |
 | **`` ⌥` ``** (hold `⌥`) | Window Switcher: current app's windows only |
+| **`/`** (in switcher) | Search windows by title or app name |
 | **`⇥` / `⇧⇥`** (in history) | Next / previous filter tab |
 | **`⌥⌘V`** | Paste next item in Sequential Queue Mode |
 | **`Space`** | **Toggle Quick Look preview drawer, QR code, image compression & text tools** |
@@ -277,6 +279,16 @@ open build/ClipStack.app
   To have ClipStack start automatically when your Mac turns on:
   Right-click the menu bar icon (or click the ⚙️ gear icon) and verify **Launch at Login** is checked.
 
+### 🩺 Troubleshooting
+
+| Symptom | Fix |
+| :--- | :--- |
+| `⌥Tab` does nothing | ClipStack needs **Accessibility**. If it's already switched on but still doesn't work, the grant belongs to an older build: run `tccutil reset Accessibility com.ayush.clipstack`, relaunch ClipStack and allow it again. The switcher turns on by itself within ~2 s of being allowed. Also quit AltTab or any other app using `⌥Tab`. |
+| Text Extractor says "No text found" / keeps asking for Screen Recording | Run `tccutil reset ScreenCapture com.ayush.clipstack`, press `⌘⇧2`, allow ClipStack, then use **Relaunch ClipStack** in the dialog. macOS only applies Screen Recording after a restart. |
+| Permissions reset after every rebuild | Run `./scripts/make-signing-cert.sh` once, then `./build.sh install`. Without it each build is ad-hoc signed and macOS treats it as a new app. |
+| Switcher shows app icons instead of thumbnails | Allow **Screen Recording** (see above). |
+| `⌘Tab` stopped working after a crash | Only if you set the hold key to `⌘`. Open ClipStack and quit it from the menu bar to hand `⌘Tab` back to macOS. |
+
 ---
 
 ## 📁 Project Structure
@@ -285,6 +297,8 @@ open build/ClipStack.app
 smart-clipboard-mac/
 ├── Package.swift               # Swift Package Manager manifest
 ├── build.sh                    # Automated release build, codesign & install script
+├── scripts/
+│   └── make-signing-cert.sh    # One-time local signing identity (keeps permissions across rebuilds)
 ├── Resources/
 │   ├── AppIcon.icns            # Retina macOS application icon
 │   └── Info.plist              # Bundle metadata & usage descriptions
@@ -299,8 +313,15 @@ smart-clipboard-mac/
 │       ├── OCR.swift           # Apple Vision framework neural OCR & barcode engine
 │       ├── HotKey.swift        # Carbon global hotkey wrapper
 │       ├── ScreenshotWatcher.swift # Real-time screenshot directory watcher
-│       ├── Utilities.swift     # Liquid glass view modifiers, sound effects, HUD toasts & paster
-│       └── Prefs.swift         # User preferences and keyboard presets
+│       ├── Utilities.swift     # Liquid glass view modifiers, sound effects, HUD toasts, paster & text extractor
+│       ├── Prefs.swift         # User preferences and keyboard presets
+│       └── Switcher/           # Built-in ⌥Tab window switcher
+│           ├── WindowSwitcher.swift      # Event tap, open/cycle/commit, actions, search, thumbnails
+│           ├── WindowModel.swift         # Window discovery across Spaces + recently-used tracking
+│           ├── SkyLight.swift            # Window-server bridge (Spaces, cross-Space focus)
+│           ├── SwitcherViews.swift       # Thumbnails / App Icons / Titles UI, badges, preview
+│           ├── SwitcherSettings.swift    # Switcher preferences model
+│           └── SwitcherSettingsView.swift # Settings window (controls, appearance, filters, exclusions)
 └── docs/
     └── assets/
         ├── banner.svg          # Hero graphic
