@@ -35,37 +35,68 @@ final class PanelState: ObservableObject {
     @Published var quickLookItem: ClipItem?
 
     func filtered(_ items: [ClipItem]) -> [ClipItem] {
-        var list = items
-        switch filter {
-        case .all:
-            break
-        case .snippets:
-            list = list.filter { $0.isSnippetItem }
-        case .text:
-            list = list.filter { $0.kind == .text && !$0.isSnippetItem }
-        case .images:
-            list = list.filter { item in
-                item.kind == .image || (item.kind == .file && ClipboardStore.shared.ocrURL(for: item) != nil)
-            }
-        case .links:
-            list = list.filter { item in
-                guard item.kind == .text, let text = item.text else { return false }
-                return SmartText.url(from: text) != nil
-            }
-        case .code:
-            list = list.filter { item in
-                guard item.kind == .text, let text = item.text else { return false }
-                if SmartText.prettyJSON(from: text) != nil { return true }
-                let codeKeywords = ["func ", "def ", "class ", "const ", "let ", "var ", "import ", "<?", "<html", "SELECT ", "git ", "npm ", "docker "]
-                return codeKeywords.contains { text.contains($0) }
-            }
-        case .pinned:
-            list = list.filter { $0.pinned }
-        }
-
+        let list = items.filter { filter.matches($0) }
         let q = query.trimmingCharacters(in: .whitespaces)
         guard !q.isEmpty else { return list }
         return list.filter { $0.searchText.localizedCaseInsensitiveContains(q) }
+    }
+}
+
+extension ClipFilter {
+    @MainActor
+    func matches(_ item: ClipItem) -> Bool {
+        switch self {
+        case .all: return true
+        case .snippets: return item.isSnippetItem
+        case .text: return item.kind == .text && !item.isSnippetItem
+        case .images: return ClipTraits.of(item).isImage
+        case .links: return ClipTraits.of(item).url != nil
+        case .code: return ClipTraits.of(item).isCode
+        case .pinned: return item.pinned
+        }
+    }
+}
+
+/// Expensive per-item content analysis (URL / colour / JSON / code / secrets),
+/// computed once per clip instead of on every SwiftUI render.
+struct ClipTraits {
+    let url: URL?
+    let color: NSColor?
+    let sensitive: SmartText.SensitiveInfo?
+    let isJSON: Bool
+    let isCode: Bool
+    let isImage: Bool
+
+    private static let codeKeywords = ["func ", "def ", "class ", "const ", "let ", "var ", "import ", "<?",
+                                       "<html", "SELECT ", "git ", "npm ", "docker ", "=> ", "();", "{\n"]
+    @MainActor private static var cache: [String: ClipTraits] = [:]
+
+    @MainActor
+    static func of(_ item: ClipItem) -> ClipTraits {
+        let key = "\(item.id.uuidString)|\(item.hash)"
+        if let hit = cache[key] { return hit }
+        let t = compute(item)
+        if cache.count > 2000 { cache.removeAll(keepingCapacity: true) }
+        cache[key] = t
+        return t
+    }
+
+    @MainActor
+    private static func compute(_ item: ClipItem) -> ClipTraits {
+        let isImage = item.kind == .image || (item.kind == .file && ClipboardStore.shared.ocrURL(for: item) != nil)
+        guard item.kind == .text, let text = item.text else {
+            return ClipTraits(url: nil, color: nil, sensitive: nil, isJSON: false, isCode: false, isImage: isImage)
+        }
+        let isJSON = SmartText.prettyJSON(from: text) != nil
+        let url = SmartText.url(from: text)
+        return ClipTraits(
+            url: url,
+            color: SmartText.color(from: text),
+            sensitive: SmartText.detectSensitive(in: text),
+            isJSON: isJSON,
+            isCode: url == nil && (isJSON || codeKeywords.contains { text.contains($0) }),
+            isImage: false
+        )
     }
 }
 
@@ -110,7 +141,7 @@ final class FloatingPanel: NSPanel {
         isOpaque = false
         hasShadow = true
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
-        minSize = NSSize(width: 370, height: 440)
+        minSize = NSSize(width: 380, height: 460)
         [.closeButton, .miniaturizeButton, .zoomButton].forEach { standardWindowButton($0)?.isHidden = true }
     }
 
@@ -158,6 +189,9 @@ final class PanelController {
             convertImageToPNG: { [weak self] item in self?.convertImageToPNG(item) }
         )
         panel.contentView = NSHostingView(rootView: HistoryView(store: store, state: state, actions: actions))
+
+        // The text extractor must never capture (or be blocked by) our own panel.
+        ScreenTextCapture.willBegin = { [weak self] in self?.hide() }
     }
 
     var isVisible: Bool { panel.isVisible }
@@ -256,6 +290,8 @@ final class PanelController {
             }
             if state.query.isEmpty { hide() } else { state.query = "" }
             return true
+        case kVK_Tab:
+            cycleFilter(by: shift ? -1 : 1); return true
         case kVK_DownArrow:
             move(by: 1, count: count); return true
         case kVK_UpArrow:
@@ -303,6 +339,17 @@ final class PanelController {
         default:
             return false
         }
+    }
+
+    private func cycleFilter(by delta: Int) {
+        let all = ClipFilter.allCases
+        guard let i = all.firstIndex(of: state.filter) else { return }
+        Haptics.tap()
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+            state.filter = all[(i + delta + all.count) % all.count]
+            state.selection = 0
+        }
+        state.scrollTarget = visibleItems.first?.id
     }
 
     private func move(by delta: Int, count: Int) {
@@ -497,88 +544,60 @@ struct HistoryView: View {
     @State private var snippetTitle = ""
     @State private var snippetText = ""
 
+    private static let corner: CGFloat = 20
+
     var body: some View {
         let items = state.filtered(store.items)
         let selection = items.isEmpty ? -1 : min(state.selection, items.count - 1)
 
-        ZStack {
-            // Base Apple Liquid Glass backdrop
-            VisualEffect(material: .hudWindow)
-                .ignoresSafeArea()
-
-            LinearGradient(
-                stops: [
-                    .init(color: Color.white.opacity(0.08), location: 0.0),
-                    .init(color: Color.white.opacity(0.01), location: 0.5),
-                    .init(color: Color.accentColor.opacity(0.03), location: 1.0)
-                ],
-                startPoint: .topLeading, endPoint: .bottomTrailing
-            )
-            .ignoresSafeArea()
-
+        ZStack(alignment: .bottom) {
             VStack(spacing: 0) {
                 header
+                if queueManager.isActive { queueBanner.transition(.move(edge: .top).combined(with: .opacity)) }
                 searchField
                 filterBar
-                Divider().opacity(0.08)
+                Rectangle().fill(Color.primary.opacity(0.07)).frame(height: 0.5)
 
                 if items.isEmpty {
                     emptyState
                 } else {
-                    ScrollViewReader { proxy in
-                        ScrollView {
-                            LazyVStack(spacing: 6) {
-                                ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                                    ClipRow(item: item, index: index, selected: index == selection,
-                                            store: store, state: state, actions: actions)
-                                        .id(item.id)
-                                        .onTapGesture { actions.paste(item) }
-                                        .onHover { if $0 { state.selection = index } }
-                                }
-                            }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 8)
-                        }
-                        .onChange(of: state.scrollTarget) { _, target in
-                            guard let target else { return }
-                            withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(target) }
-                        }
-                    }
+                    list(items, selection: selection)
                 }
                 footer
             }
 
-            // Quick Look Glass Drawer
+            // Quick Look drawer
             if let qItem = state.quickLookItem {
-                QuickLookDrawer(item: qItem, store: store, actions: actions) {
-                    withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
-                        state.quickLookItem = nil
-                    }
-                }
-                .transition(.asymmetric(
-                    insertion: .move(edge: .bottom).combined(with: .opacity),
-                    removal: .move(edge: .bottom).combined(with: .opacity)
-                ))
-                .zIndex(10)
+                Color.black.opacity(0.18)
+                    .contentShape(Rectangle())
+                    .onTapGesture { closeQuickLook() }
+                    .transition(.opacity)
+                    .zIndex(9)
+                QuickLookDrawer(item: qItem, store: store, actions: actions, onClose: closeQuickLook)
+                    .id(qItem.id)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .zIndex(10)
             }
         }
         .frame(minWidth: 380, minHeight: 460)
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .background(panelBackground)
+        .clipShape(RoundedRectangle(cornerRadius: Self.corner, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
+            RoundedRectangle(cornerRadius: Self.corner, style: .continuous)
                 .strokeBorder(
                     LinearGradient(
                         stops: [
-                            .init(color: Color.white.opacity(0.40), location: 0.0),
-                            .init(color: Color.white.opacity(0.12), location: 0.35),
+                            .init(color: Color.white.opacity(0.38), location: 0.0),
+                            .init(color: Color.white.opacity(0.10), location: 0.35),
                             .init(color: Color.white.opacity(0.03), location: 0.70),
-                            .init(color: Color.white.opacity(0.20), location: 1.0)
+                            .init(color: Color.white.opacity(0.16), location: 1.0)
                         ],
                         startPoint: .topLeading, endPoint: .bottomTrailing
                     ),
                     lineWidth: 1
                 )
         )
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: queueManager.isActive)
         .popover(isPresented: $showingNewSnippet, arrowEdge: .top) {
             newSnippetPopover
         }
@@ -587,98 +606,172 @@ struct HistoryView: View {
         .onAppear { searchFocused = true }
     }
 
-    private var header: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "doc.on.clipboard.fill")
-                .foregroundStyle(Color.accentColor)
-                .font(.system(size: 14, weight: .semibold))
-            Text("Clipboard")
-                .font(.system(size: 13.5, weight: .semibold))
-            Text("\(store.items.count)")
-                .font(.system(size: 11, weight: .semibold))
-                .padding(.horizontal, 6).padding(.vertical, 1.5)
-                .background(Capsule().fill(Color.primary.opacity(0.08)))
-
-            if queueManager.isActive {
-                HStack(spacing: 4) {
-                    Circle().fill(Color.green).frame(width: 6, height: 6)
-                    Text("Queue: \(queueManager.currentIndex + 1)/\(queueManager.queue.count)")
-                        .font(.system(size: 10.5, weight: .semibold))
-                    Button {
-                        queueManager.stopQueue()
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 8, weight: .bold))
-                    }
-                    .buttonStyle(.plain)
-                }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2.5)
-                .background(Capsule().fill(Color.green.opacity(0.18)))
-                .foregroundStyle(Color.green)
+    @ViewBuilder
+    private var panelBackground: some View {
+        if #available(macOS 26, *) {
+            Color.clear.glassEffect(.regular, in: RoundedRectangle(cornerRadius: Self.corner, style: .continuous))
+        } else {
+            ZStack {
+                VisualEffect(material: .hudWindow)
+                LinearGradient(
+                    stops: [
+                        .init(color: Color.white.opacity(0.08), location: 0.0),
+                        .init(color: Color.white.opacity(0.01), location: 0.5),
+                        .init(color: Color.accentColor.opacity(0.03), location: 1.0)
+                    ],
+                    startPoint: .topLeading, endPoint: .bottomTrailing
+                )
             }
-
-            Spacer()
-
-            Button {
-                showingNewSnippet = true
-            } label: {
-                Image(systemName: "plus.circle")
-                    .font(.system(size: 12.5))
-            }
-            .buttonStyle(.borderless)
-            .help("Create a new permanent snippet / template")
-
-            Button {
-                actions.mergeRecent()
-            } label: {
-                Image(systemName: "rectangle.stack.badge.plus")
-                    .font(.system(size: 12))
-            }
-            .buttonStyle(.borderless)
-            .help("Merge recent clips (top 3) into one combined clip")
-
-            Button {
-                actions.toggleQueue()
-            } label: {
-                Image(systemName: queueManager.isActive ? "list.number" : "arrow.triangle.2.circlepath")
-                    .font(.system(size: 12))
-                    .foregroundStyle(queueManager.isActive ? Color.green : Color.primary)
-            }
-            .buttonStyle(.borderless)
-            .help(queueManager.isActive ? "Stop Sequential Queue" : "Start Sequential Queue (⌥⌘V to paste next)")
-
-            Button {
-                actions.captureScreenText()
-            } label: {
-                Image(systemName: "text.viewfinder")
-                    .font(.system(size: 12.5))
-            }
-            .buttonStyle(.borderless)
-            .help("Extract text from any screen region (⌘⇧2)")
-
-            Button {
-                actions.clear()
-            } label: {
-                Image(systemName: "trash")
-                    .font(.system(size: 12.5))
-            }
-            .buttonStyle(.borderless)
-            .help("Clear history (keeps pinned items & snippets)")
-
-            Button {
-                actions.openSettings(nil)
-            } label: {
-                Image(systemName: "gearshape")
-                    .font(.system(size: 12.5))
-            }
-            .buttonStyle(.borderless)
-            .help("Preferences & settings")
         }
-        .padding(.horizontal, 14)
+    }
+
+    private func closeQuickLook() {
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) { state.quickLookItem = nil }
+    }
+
+    private func list(_ items: [ClipItem], selection: Int) -> some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 6) {
+                    ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                        ClipRow(item: item, index: index, selected: index == selection,
+                                store: store, state: state, actions: actions)
+                            .id(item.id)
+                            .onTapGesture { actions.paste(item) }
+                            .onHover { inside in
+                                if inside && state.selection != index { state.selection = index }
+                            }
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+            }
+            .scrollIndicators(.automatic)
+            .onChange(of: state.scrollTarget) { _, target in
+                guard let target else { return }
+                withAnimation(.easeOut(duration: 0.12)) { proxy.scrollTo(target) }
+            }
+        }
+    }
+
+    // MARK: Header
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(LinearGradient(colors: [Color.accentColor, Color.accentColor.opacity(0.7)],
+                                         startPoint: .top, endPoint: .bottom))
+                Image(systemName: "doc.on.clipboard.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+            .frame(width: 28, height: 28)
+            .shadow(color: Color.accentColor.opacity(0.35), radius: 6, y: 2)
+
+            VStack(alignment: .leading, spacing: 0) {
+                Text("ClipStack")
+                    .font(.system(size: 13.5, weight: .semibold))
+                Text(store.items.count == 1 ? "1 item" : "\(store.items.count) items")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .contentTransition(.numericText())
+            }
+            .lineLimit(1)
+            .fixedSize()
+
+            Spacer(minLength: 8)
+
+            toolbar
+        }
+        .padding(.leading, 14)
+        .padding(.trailing, 10)
         .padding(.top, 12)
+        .padding(.bottom, 10)
+    }
+
+    private var toolbar: some View {
+        HStack(spacing: 0) {
+            toolButton("text.viewfinder", help: "Extract text from screen (\(HotkeyPreset.textCapture.title))") {
+                actions.captureScreenText()
+            }
+            toolButton(queueManager.isActive ? "stop.circle" : "list.number",
+                       tint: queueManager.isActive ? .green : nil,
+                       help: queueManager.isActive ? "Stop Sequential Queue" : "Queue top 5 clips (⌥⌘V pastes next)") {
+                actions.toggleQueue()
+            }
+            toolButton("plus", help: "New snippet") { showingNewSnippet = true }
+
+            Menu {
+                Button { actions.mergeRecent() } label: {
+                    Label("Merge Top 3 Clips", systemImage: "rectangle.stack.badge.plus")
+                }
+                Button { actions.captureScreenText() } label: {
+                    Label("Extract Text from Screen", systemImage: "text.viewfinder")
+                }
+                Divider()
+                Button(role: .destructive) { actions.clear() } label: {
+                    Label("Clear History (keeps pinned)", systemImage: "trash")
+                }
+                Divider()
+                Button { actions.openSettings(nil) } label: {
+                    Label("Settings…", systemImage: "gearshape")
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 28, height: 26)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("More")
+        }
+        .padding(.horizontal, 3)
+        .glassSurface(Capsule(), interactive: true)
+    }
+
+    private func toolButton(_ symbol: String, tint: Color? = nil, help: String,
+                            action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(tint ?? Color.primary.opacity(0.85))
+                .frame(width: 28, height: 26)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(PressableStyle())
+        .help(help)
+    }
+
+    private var queueBanner: some View {
+        HStack(spacing: 8) {
+            Circle().fill(Color.green).frame(width: 7, height: 7)
+                .shadow(color: .green.opacity(0.6), radius: 3)
+            Text("Queue \(queueManager.currentIndex + 1) of \(queueManager.queue.count)")
+                .font(.system(size: 11.5, weight: .semibold))
+                .monospacedDigit()
+            Text("· \(HotkeyPreset.queuePaste.title) pastes next")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            Button("Stop") { queueManager.stopQueue() }
+                .font(.system(size: 11, weight: .semibold))
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.green)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.green.opacity(0.12)))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.green.opacity(0.25), lineWidth: 0.6))
+        .padding(.horizontal, 10)
         .padding(.bottom, 8)
     }
+
+    // MARK: Snippet popover
 
     private var newSnippetPopover: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -693,18 +786,21 @@ struct HistoryView: View {
                 .buttonStyle(.plain)
             }
 
-            TextField("Title (e.g. My Bio, Greeting, SQL Query)", text: $snippetTitle)
+            TextField("Title (e.g. Bio, Greeting, SQL query)", text: $snippetTitle)
                 .textFieldStyle(.roundedBorder)
 
             TextEditor(text: $snippetText)
                 .font(.system(size: 12, design: .monospaced))
-                .frame(height: 100)
-                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.primary.opacity(0.12), lineWidth: 1))
+                .scrollContentBackground(.hidden)
+                .padding(4)
+                .frame(height: 110)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.04)))
+                .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.12), lineWidth: 1))
 
             HStack {
                 Spacer()
                 Button("Cancel") { showingNewSnippet = false }
-                    .buttonStyle(.bordered)
+                    .keyboardShortcut(.cancelAction)
                 Button("Save Snippet") {
                     actions.createSnippet(snippetTitle, snippetText)
                     snippetTitle = ""
@@ -712,6 +808,7 @@ struct HistoryView: View {
                     showingNewSnippet = false
                 }
                 .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
                 .disabled(snippetText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
@@ -719,175 +816,199 @@ struct HistoryView: View {
         .frame(width: 320)
     }
 
+    // MARK: Search
+
     private var searchField: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 7) {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
-                .font(.system(size: 12))
-            TextField("Search text, snippets, links, code, or images…", text: $state.query)
+                .font(.system(size: 12, weight: .medium))
+            TextField("Search clipboard", text: $state.query)
                 .textFieldStyle(.plain)
-                .font(.system(size: 12.5))
+                .font(.system(size: 13))
                 .focused($searchFocused)
+                .lineLimit(1)
             if !state.query.isEmpty {
                 Button {
                     state.query = ""
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundStyle(.secondary)
-                        .font(.system(size: 11))
+                        .font(.system(size: 12))
                 }
                 .buttonStyle(.plain)
+                .transition(.opacity)
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
+        .padding(.horizontal, 11)
+        .frame(height: 32)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.primary.opacity(0.06))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.6)
-                )
+                .fill(Color.primary.opacity(searchFocused ? 0.075 : 0.05))
         )
-        .padding(.horizontal, 10)
-        .padding(.bottom, 6)
-    }
-
-    private var filterBar: some View {
-        HStack(spacing: 3) {
-            ForEach(ClipFilter.allCases) { filter in
-                let count = count(for: filter)
-                let isSelected = state.filter == filter
-
-                Button {
-                    Haptics.tap()
-                    withAnimation(.spring(response: 0.26, dampingFraction: 0.78)) {
-                        state.filter = filter
-                        state.selection = 0
-                    }
-                } label: {
-                    HStack(spacing: 3.5) {
-                        Image(systemName: filter.icon)
-                            .font(.system(size: 9.5, weight: isSelected ? .semibold : .regular))
-                        Text(filter.rawValue)
-                            .font(.system(size: 11, weight: isSelected ? .semibold : .medium))
-                        if count > 0 && filter != .all {
-                            Text("\(count)")
-                                .font(.system(size: 9, weight: .bold))
-                                .padding(.horizontal, 3.5)
-                                .padding(.vertical, 0.5)
-                                .background(
-                                    Capsule()
-                                        .fill(isSelected ? Color.white.opacity(0.25) : Color.primary.opacity(0.08))
-                                )
-                        }
-                    }
-                    .padding(.horizontal, 7.5)
-                    .padding(.vertical, 5)
-                    .foregroundStyle(isSelected ? Color.white : Color.primary.opacity(0.75))
-                    .background {
-                        if isSelected {
-                            Capsule()
-                                .fill(
-                                    LinearGradient(
-                                        colors: [Color.accentColor, Color.accentColor.opacity(0.85)],
-                                        startPoint: .top, endPoint: .bottom
-                                    )
-                                )
-                                .overlay(
-                                    Capsule()
-                                        .strokeBorder(Color.white.opacity(0.28), lineWidth: 0.8)
-                                 )
-                                .shadow(color: Color.accentColor.opacity(0.35), radius: 6, x: 0, y: 2)
-                                .matchedGeometryEffect(id: "liquidTab", in: tabNamespace)
-                        }
-                    }
-                    .contentShape(Capsule())
-                }
-                .buttonStyle(.plain)
-            }
-            Spacer()
-        }
-        .padding(3)
-        .background(
-            Capsule()
-                .fill(Color.primary.opacity(0.038))
-                .overlay(
-                    Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5)
-                )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(searchFocused ? Color.accentColor.opacity(0.45) : Color.white.opacity(0.12),
+                              lineWidth: searchFocused ? 1 : 0.6)
         )
+        .animation(.easeOut(duration: 0.15), value: searchFocused)
+        .animation(.easeOut(duration: 0.15), value: state.query.isEmpty)
         .padding(.horizontal, 10)
         .padding(.bottom, 8)
     }
 
-    private func count(for filter: ClipFilter) -> Int {
-        switch filter {
-        case .all:
-            return store.items.count
-        case .snippets:
-            return store.items.filter { $0.isSnippetItem }.count
-        case .text:
-            return store.items.filter { $0.kind == .text && !$0.isSnippetItem }.count
-        case .images:
-            return store.items.filter { $0.kind == .image || ($0.kind == .file && store.ocrURL(for: $0) != nil) }.count
-        case .links:
-            return store.items.filter { item in
-                guard item.kind == .text, let text = item.text else { return false }
-                return SmartText.url(from: text) != nil
-            }.count
-        case .code:
-            return store.items.filter { item in
-                guard item.kind == .text, let text = item.text else { return false }
-                if SmartText.prettyJSON(from: text) != nil { return true }
-                let codeKeywords = ["func ", "def ", "class ", "const ", "let ", "var ", "import ", "<?", "<html", "SELECT ", "git ", "npm ", "docker "]
-                return codeKeywords.contains { text.contains($0) }
-            }.count
-        case .pinned:
-            return store.items.filter { $0.pinned }.count
+    // MARK: Filter chips (horizontally scrollable — never squeezes or overlaps)
+
+    private var filterBar: some View {
+        let counts = filterCounts
+        return ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 4) {
+                    ForEach(ClipFilter.allCases) { filter in
+                        filterChip(filter, count: counts[filter] ?? 0)
+                            .id(filter)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 2)
+            }
+            .scrollIndicators(.never)
+            .onChange(of: state.filter) { _, f in
+                withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(f, anchor: .center) }
+            }
         }
+        .frame(height: 30)
+        .padding(.bottom, 8)
     }
+
+    private func filterChip(_ filter: ClipFilter, count: Int) -> some View {
+        let isSelected = state.filter == filter
+        return Button {
+            Haptics.tap()
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+                state.filter = filter
+                state.selection = 0
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: filter.icon)
+                    .font(.system(size: 10, weight: .semibold))
+                Text(filter.rawValue)
+                    .font(.system(size: 11.5, weight: .medium))
+                if filter != .all && count > 0 {
+                    Text("\(count)")
+                        .font(.system(size: 9.5, weight: .bold))
+                        .monospacedDigit()
+                        .foregroundStyle(isSelected ? Color.white.opacity(0.9) : Color.secondary)
+                }
+            }
+            .lineLimit(1)
+            .fixedSize()
+            .padding(.horizontal, 10)
+            .frame(height: 26)
+            .foregroundStyle(isSelected ? Color.white : Color.primary.opacity(0.78))
+            .background {
+                if isSelected {
+                    Capsule()
+                        .fill(LinearGradient(colors: [Color.accentColor, Color.accentColor.opacity(0.82)],
+                                             startPoint: .top, endPoint: .bottom))
+                        .overlay(Capsule().strokeBorder(Color.white.opacity(0.28), lineWidth: 0.7))
+                        .shadow(color: Color.accentColor.opacity(0.35), radius: 5, x: 0, y: 2)
+                        .matchedGeometryEffect(id: "liquidTab", in: tabNamespace)
+                } else {
+                    Capsule().fill(Color.primary.opacity(0.045))
+                        .overlay(Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5))
+                }
+            }
+            .contentShape(Capsule())
+        }
+        .buttonStyle(PressableStyle())
+    }
+
+    /// One pass over the items instead of seven.
+    private var filterCounts: [ClipFilter: Int] {
+        var c: [ClipFilter: Int] = [:]
+        for item in store.items {
+            for f in ClipFilter.allCases where f != .all && f.matches(item) {
+                c[f, default: 0] += 1
+            }
+        }
+        return c
+    }
+
+    // MARK: Empty / footer
 
     private var emptyState: some View {
         VStack(spacing: 10) {
             Spacer()
             Image(systemName: state.query.isEmpty ? "doc.on.clipboard" : "magnifyingglass")
-                .font(.system(size: 38)).foregroundStyle(.tertiary)
-            Text(state.query.isEmpty ? "Copy text, images, or screenshots to see them here" : "No matches found")
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: 34, weight: .light))
+                .foregroundStyle(.tertiary)
+            Text(state.query.isEmpty
+                 ? (state.filter == .all ? "Nothing copied yet" : "No \(state.filter.rawValue.lowercased()) yet")
+                 : "No matches for “\(state.query)”")
+                .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.secondary)
-            if state.query.isEmpty {
-                Text("Press \(HotkeyPreset.current.title) anywhere to open")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
-            }
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Text(state.query.isEmpty
+                 ? "Copy text, images or screenshots — or press \(HotkeyPreset.textCapture.title) to grab text from the screen."
+                 : "Try another word, or press Tab to switch filters.")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 260)
             Spacer()
         }
+        .padding(.horizontal, 20)
         .frame(maxWidth: .infinity)
     }
 
     private var footer: some View {
-        HStack(spacing: 12) {
-            hint("↩", "paste")
-            hint("⇧↩", "plain")
-            hint("Space", "preview")
-            hint("⌥⌘V", "queue")
-            hint("⌘E", "OCR")
-            hint("⌘P", "pin")
-            Spacer()
-            Text("Limit: \(Prefs.historyLimit)")
+        HStack(spacing: 10) {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) {
+                    hint("↩", "Paste"); hint("⇧↩", "Plain"); hint("Space", "Preview")
+                    hint("⇥", "Filter"); hint("⌘P", "Pin"); hint("⌘E", "OCR")
+                }
+                HStack(spacing: 10) {
+                    hint("↩", "Paste"); hint("⇧↩", "Plain"); hint("Space", "Preview"); hint("⇥", "Filter")
+                }
+                HStack(spacing: 10) {
+                    hint("↩", "Paste"); hint("Space", "Preview")
+                }
+            }
+            Spacer(minLength: 0)
         }
         .font(.system(size: 10.5))
         .foregroundStyle(.secondary)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
+        .frame(height: 32)
         .background(Color.primary.opacity(0.03))
+        .overlay(alignment: .top) { Rectangle().fill(Color.primary.opacity(0.07)).frame(height: 0.5) }
     }
 
     private func hint(_ key: String, _ label: String) -> some View {
-        HStack(spacing: 3) {
-            Text(key).fontWeight(.semibold)
+        HStack(spacing: 4) {
+            Text(key)
+                .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+                .padding(.horizontal, 4)
+                .frame(minWidth: 16, minHeight: 15)
+                .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(Color.primary.opacity(0.08)))
             Text(label)
         }
+        .lineLimit(1)
+        .fixedSize()
+    }
+}
+
+/// Subtle press feedback for plain buttons.
+struct PressableStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.6 : 1)
+            .scaleEffect(configuration.isPressed ? 0.94 : 1)
+            .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
     }
 }
 
@@ -909,142 +1030,101 @@ struct ClipRow: View {
         return f
     }()
 
-    private var canOCR: Bool { store.ocrURL(for: item) != nil }
+    private var traits: ClipTraits { ClipTraits.of(item) }
+    private var canOCR: Bool { traits.isImage }
+    private var showActions: Bool { hovering || selected }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            content
-            meta
+        let t = traits
+        HStack(alignment: .top, spacing: 10) {
+            badge(t)
+            VStack(alignment: .leading, spacing: 6) {
+                content(t)
+                meta(t)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(10)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .liquidGlassCard(isSelected: selected, isHovered: hovering, cornerRadius: 11)
-        .overlay(alignment: .topTrailing) {
-            if hovering || selected { buttons.padding(6) }
-        }
-        .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .liquidGlassCard(isSelected: selected, isHovered: hovering, cornerRadius: 12)
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .onHover { hovering = $0 }
-        .contextMenu {
-            Button("Paste") { actions.paste(item) }
-            Button("Paste as Plain Text (⇧↩)") { actions.pastePlainText(item) }
-            Button("Copy Only") { actions.copyOnly(item) }
+        .contextMenu { contextMenu(t) }
+    }
 
-            if let text = item.text, let url = SmartText.url(from: text) {
-                Button("Open Link in Browser (⌘O)") { actions.openURL(url) }
+    // Leading type badge — gives every row a stable left edge.
+    private func badge(_ t: ClipTraits) -> some View {
+        let (symbol, color) = badgeStyle(t)
+        return ZStack {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(t.color.map { Color(nsColor: $0) } ?? color.opacity(0.16))
+            if t.color == nil {
+                Image(systemName: symbol)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(color)
             }
-            if canOCR {
-                Button("Extract Text (⌘E)") { actions.extractText(item) }
-            }
-            Button(item.isSnippetItem ? "Remove from Snippets" : "Save as Snippet") {
-                actions.toggleSnippet(item)
-            }
-            Button("Merge Top 3 into One") {
-                actions.mergeRecent()
-            }
-            Button(item.pinned ? "Unpin" : "Pin (⌘P)") { actions.togglePin(item) }
-            if item.kind != .text { Button("Show in Finder") { actions.reveal(item) } }
-            Divider()
-            Button("Quick Look (Space)") {
-                withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
-                    state.quickLookItem = item
-                }
-            }
-            Divider()
-            Button("Delete (⌘⌫)", role: .destructive) { actions.delete(item) }
+        }
+        .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(Color.white.opacity(0.14), lineWidth: 0.6))
+        .frame(width: 26, height: 26)
+    }
+
+    private func badgeStyle(_ t: ClipTraits) -> (String, Color) {
+        if t.sensitive != nil { return ("lock.fill", .orange) }
+        if item.isSnippetItem { return ("bookmark.fill", .purple) }
+        switch item.kind {
+        case .text:
+            if t.url != nil { return ("link", .blue) }
+            if t.isJSON { return ("curlybraces", .orange) }
+            if t.isCode { return ("chevron.left.forwardslash.chevron.right", .pink) }
+            return ("text.alignleft", .secondary)
+        case .image:
+            return (item.source == "Screenshot" ? "camera.viewfinder" : "photo", .teal)
+        case .file:
+            return (canOCR ? "photo" : "doc", .indigo)
         }
     }
 
     @ViewBuilder
-    private var content: some View {
+    private func content(_ t: ClipTraits) -> some View {
         switch item.kind {
         case .text:
-            let textVal = item.text ?? ""
-            let sensitive = SmartText.detectSensitive(in: textVal)
-            let isMasked = (sensitive != nil) && Prefs.autoMaskSensitive && !isRevealed
-
-            VStack(alignment: .leading, spacing: 4) {
-                // Sensitive badge if detected
-                if let sensitive {
-                    HStack(spacing: 5) {
-                        Image(systemName: "lock.shield.fill")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.orange)
-                        Text(sensitive.type)
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.orange)
-                        Spacer()
-                        Button {
-                            isRevealed.toggle()
-                        } label: {
-                            HStack(spacing: 3) {
-                                Image(systemName: isRevealed ? "eye.slash" : "eye")
-                                Text(isRevealed ? "Hide" : "Reveal")
-                            }
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.orange.opacity(0.12)))
-                }
-
-                // Snippet title badge
+            let isMasked = t.sensitive != nil && Prefs.autoMaskSensitive && !isRevealed
+            VStack(alignment: .leading, spacing: 3) {
                 if item.isSnippetItem {
-                    HStack(spacing: 4) {
-                        Image(systemName: "bookmark.fill")
-                            .font(.system(size: 9.5))
-                            .foregroundStyle(.purple)
-                        Text(item.snippetTitle ?? "Template")
-                            .font(.system(size: 10.5, weight: .semibold))
-                            .foregroundStyle(.purple)
-                    }
-                    .padding(.horizontal, 6).padding(.vertical, 1.5)
-                    .background(Capsule().fill(Color.purple.opacity(0.12)))
+                    Text(item.snippetTitle ?? "Snippet")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.purple)
+                        .lineLimit(1)
                 }
-
-                // Color swatch header if it's a hex color
-                if let col = SmartText.color(from: textVal) {
-                    HStack(spacing: 6) {
-                        Circle()
-                            .fill(Color(nsColor: col))
-                            .frame(width: 14, height: 14)
-                            .overlay(Circle().strokeBorder(Color.white.opacity(0.3), lineWidth: 1))
-                            .shadow(color: Color(nsColor: col).opacity(0.4), radius: 3)
-                        Text(SmartText.hexString(from: col))
-                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                    }
+                if let url = t.url, let host = url.host {
+                    Text(host)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                        .lineLimit(1)
                 }
-                // URL indicator
-                if let url = SmartText.url(from: textVal) {
-                    HStack(spacing: 5) {
-                        Image(systemName: "link")
-                            .font(.system(size: 10.5, weight: .medium))
-                            .foregroundStyle(Color.accentColor)
-                        Text(url.host ?? "Website")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(Color.accentColor)
-                    }
+                if let col = t.color {
+                    Text(SmartText.hexString(from: col))
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
                 }
-                // Main Text preview
-                Text(isMasked ? (sensitive?.masked ?? item.preview) : item.preview)
-                    .font(.system(size: 12.5, design: (isMasked || item.text?.hasPrefix("{") == true) ? .monospaced : .default))
-                    .lineLimit(4)
+                Text(isMasked ? (t.sensitive?.masked ?? item.preview) : item.preview)
+                    .font(.system(size: 12.5, design: (isMasked || t.isCode) ? .monospaced : .default))
+                    .foregroundStyle(t.url != nil ? .secondary : .primary)
+                    .lineLimit(t.url != nil ? 1 : 3)
+                    .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.trailing, 72)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         case .image:
             thumbnail
         case .file:
-            if canOCR {
-                thumbnail
+            VStack(alignment: .leading, spacing: 6) {
+                if canOCR { thumbnail }
+                Text(item.preview)
+                    .font(.system(size: 12.5))
+                    .lineLimit(2)
+                    .truncationMode(.middle)
             }
-            Label(item.preview, systemImage: (item.filePaths?.count ?? 0) > 1 ? "doc.on.doc" : "doc")
-                .font(.system(size: 12.5))
-                .lineLimit(2)
-                .padding(.trailing, 72)
         }
     }
 
@@ -1054,104 +1134,123 @@ struct ClipRow: View {
             Image(nsImage: img)
                 .resizable()
                 .aspectRatio(contentMode: .fit)
-                .frame(maxWidth: .infinity, maxHeight: 130, alignment: .leading)
-                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(Color.white.opacity(0.12), lineWidth: 0.8))
+                .frame(maxWidth: .infinity, maxHeight: 120, alignment: .leading)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.white.opacity(0.12), lineWidth: 0.8))
         } else {
             Label("Image unavailable", systemImage: "photo").foregroundStyle(.secondary)
         }
     }
 
-    private var meta: some View {
+    /// Meta line. Hover actions live here (trailing) so they never cover the clip text.
+    private func meta(_ t: ClipTraits) -> some View {
         HStack(spacing: 5) {
-            if item.pinned {
-                Image(systemName: "pin.fill").foregroundStyle(.orange)
-            }
-            Image(systemName: kindIcon)
-            if let w = item.pixelWidth, let h = item.pixelHeight {
-                Text("\(w)×\(h)")
-            }
-            if let source = item.source {
-                Text(source).lineLimit(1)
-            }
-            Text("·")
-            Text(Self.relative.localizedString(for: item.date, relativeTo: Date()))
-            if canOCR && item.hasDetectedText {
-                Text("Text inside")
-                    .padding(.horizontal, 5).padding(.vertical, 1)
-                    .background(Capsule().fill(Color.accentColor.opacity(0.18)))
-            }
-            if let qr = item.qrPayload, !qr.isEmpty {
-                HStack(spacing: 3) {
-                    Image(systemName: "qrcode")
-                    Text("QR Code")
+            HStack(spacing: 5) {
+                if item.pinned {
+                    Image(systemName: "pin.fill").foregroundStyle(.orange)
                 }
-                .font(.system(size: 9.5, weight: .semibold))
-                .padding(.horizontal, 5).padding(.vertical, 1)
-                .background(Capsule().fill(Color.blue.opacity(0.15)))
-                .foregroundStyle(Color.blue)
+                Text(Self.relative.localizedString(for: item.date, relativeTo: Date()))
+                if let source = item.source, !item.isSnippetItem {
+                    Text("·")
+                    Text(source)
+                }
+                if let w = item.pixelWidth, let h = item.pixelHeight {
+                    Text("·")
+                    Text("\(w)×\(h)").monospacedDigit()
+                }
+                if let s = t.sensitive { tag(s.type, color: .orange) }
+                if t.isJSON { tag("JSON", color: .orange) }
+                if canOCR && item.hasDetectedText { tag("Text", color: .accentColor) }
+                if item.hasQRPayload { tag("QR", color: .blue) }
             }
-            if let text = item.text, SmartText.prettyJSON(from: text) != nil {
-                Text("{ } JSON")
-                    .font(.system(size: 9.5, weight: .bold, design: .monospaced))
-                    .padding(.horizontal, 4).padding(.vertical, 1)
-                    .background(Capsule().fill(Color.primary.opacity(0.08)))
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .layoutPriority(0)
+
+            Spacer(minLength: 6)
+
+            ZStack(alignment: .trailing) {
+                if index < 9 {
+                    Text("⌘\(index + 1)")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .opacity(showActions ? 0 : 1)
+                }
+                rowActions(t)
+                    .opacity(showActions ? 1 : 0)
+                    .allowsHitTesting(showActions)
             }
-            Spacer()
-            if index < 9 {
-                Text("⌘\(index + 1)").fontWeight(.medium)
-            }
+            .fixedSize()
+            .layoutPriority(1)
         }
         .font(.system(size: 10.5))
         .foregroundStyle(.secondary)
+        .frame(height: 22)
+        .animation(.easeOut(duration: 0.12), value: showActions)
     }
 
-    private var kindIcon: String {
-        if item.isSnippetItem { return "bookmark.fill" }
-        switch item.kind {
-        case .text:
-            if let t = item.text, SmartText.url(from: t) != nil { return "link" }
-            return "text.alignleft"
-        case .image:
-            return item.source == "Screenshot" ? "camera.viewfinder" : "photo"
-        case .file:
-            return "folder"
-        }
+    private func tag(_ text: String, color: Color) -> some View {
+        Text(text)
+            .font(.system(size: 9.5, weight: .semibold))
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(Capsule().fill(color.opacity(0.16)))
+            .foregroundStyle(color)
+            .fixedSize()
     }
 
-    private var buttons: some View {
-        HStack(spacing: 2) {
-            iconButton("eye", help: "Quick Look (Space)") {
-                withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
-                    state.quickLookItem = item
-                }
+    private func rowActions(_ t: ClipTraits) -> some View {
+        HStack(spacing: 0) {
+            if t.sensitive != nil && Prefs.autoMaskSensitive {
+                iconButton(isRevealed ? "eye.slash" : "eye", help: isRevealed ? "Hide" : "Reveal") { isRevealed.toggle() }
+            }
+            iconButton("text.magnifyingglass", help: "Quick Look (Space)") {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { state.quickLookItem = item }
             }
             if canOCR {
                 iconButton("text.viewfinder", help: "Extract text (⌘E)") { actions.extractText(item) }
             }
-            iconButton(item.isSnippetItem ? "bookmark.slash" : "bookmark", help: item.isSnippetItem ? "Remove snippet" : "Save as snippet") {
-                actions.toggleSnippet(item)
-            }
-            iconButton(item.pinned ? "pin.slash" : "pin", help: "Pin (⌘P)") { actions.togglePin(item) }
-            iconButton("trash", help: "Delete (⌘⌫)") { actions.delete(item) }
+            iconButton(item.pinned ? "pin.slash" : "pin", help: item.pinned ? "Unpin (⌘P)" : "Pin (⌘P)") { actions.togglePin(item) }
+            iconButton("trash", help: "Delete (⌘⌫)", role: .destructive) { actions.delete(item) }
         }
-        .padding(3)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.white.opacity(0.15), lineWidth: 0.5))
-        )
+        .padding(.horizontal, 2)
+        .background(Capsule().fill(Color.primary.opacity(0.06)))
+        .overlay(Capsule().strokeBorder(Color.white.opacity(0.12), lineWidth: 0.5))
     }
 
-    private func iconButton(_ symbol: String, help: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+    private func iconButton(_ symbol: String, help: String, role: ButtonRole? = nil,
+                            action: @escaping () -> Void) -> some View {
+        Button(role: role, action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 11, weight: .medium))
-                .frame(width: 22, height: 20)
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundStyle(role == .destructive ? Color.red.opacity(0.85) : Color.primary.opacity(0.8))
+                .frame(width: 24, height: 22)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.borderless)
+        .buttonStyle(PressableStyle())
         .help(help)
+    }
+
+    @ViewBuilder
+    private func contextMenu(_ t: ClipTraits) -> some View {
+        Button("Paste") { actions.paste(item) }
+        Button("Paste as Plain Text") { actions.pastePlainText(item) }
+        Button("Copy Only") { actions.copyOnly(item) }
+        if let url = t.url {
+            Button("Open Link") { actions.openURL(url) }
+        }
+        if canOCR {
+            Button("Extract Text") { actions.extractText(item) }
+        }
+        Divider()
+        Button(item.pinned ? "Unpin" : "Pin") { actions.togglePin(item) }
+        Button(item.isSnippetItem ? "Remove from Snippets" : "Save as Snippet") { actions.toggleSnippet(item) }
+        Button("Merge Top 3 into One") { actions.mergeRecent() }
+        if item.kind != .text { Button("Show in Finder") { actions.reveal(item) } }
+        Button("Quick Look") {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { state.quickLookItem = item }
+        }
+        Divider()
+        Button("Delete", role: .destructive) { actions.delete(item) }
     }
 }
 
@@ -1458,25 +1557,10 @@ struct QuickLookDrawer: View {
             .padding(.vertical, 10)
             .background(Color.primary.opacity(0.04))
         }
-        .frame(maxWidth: .infinity, maxHeight: 370)
-        .background(
-            ZStack {
-                VisualEffect(material: .popover)
-                Color.black.opacity(0.2)
-            }
-        )
+        .frame(maxWidth: .infinity, maxHeight: 400)
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(
-                    LinearGradient(
-                        colors: [Color.white.opacity(0.35), Color.white.opacity(0.08)],
-                        startPoint: .topLeading, endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 1
-                )
-        )
-        .shadow(color: Color.black.opacity(0.25), radius: 24, x: 0, y: 12)
+        .glassSurface(RoundedRectangle(cornerRadius: 16, style: .continuous), fallback: .popover)
+        .shadow(color: Color.black.opacity(0.22), radius: 20, x: 0, y: 10)
         .padding(8)
     }
 
