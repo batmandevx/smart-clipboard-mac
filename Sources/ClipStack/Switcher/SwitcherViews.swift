@@ -87,14 +87,15 @@ struct SwitcherView: View {
     @ViewBuilder
     private func cell(_ win: SwitcherWindow, index i: Int, width: CGFloat) -> some View {
         let selected = i == state.selection
+        let number = i < 9 ? i + 1 : nil   // press 1–9 to jump straight to this window
         switch settings.style {
         case .thumbnails:
             ThumbnailCell(window: win, thumbnail: state.thumbnails[win.windowID], selected: selected,
-                          width: width, settings: settings, perform: { actions.perform($0, i) })
+                          number: number, width: width, settings: settings, perform: { actions.perform($0, i) })
         case .appIcons:
-            IconCell(window: win, selected: selected, width: width, settings: settings)
+            IconCell(window: win, selected: selected, number: number, width: width, settings: settings)
         case .titles:
-            TitleRow(window: win, selected: selected, width: width, settings: settings,
+            TitleRow(window: win, selected: selected, number: number, width: width, settings: settings,
                      perform: { actions.perform($0, i) })
         }
     }
@@ -118,7 +119,7 @@ struct SwitcherView: View {
 
     private var legend: some View {
         HStack(spacing: 12) {
-            key("⇥", "Next"); key("⇧⇥", "Back"); key("/", "Search"); key("W", "Close"); key("M", "Minimize")
+            key("⇥", "Next"); key("⇧⇥", "Back"); key("1–9", "Jump"); key("/", "Search"); key("W", "Close"); key("M", "Minimize")
             key("F", "Full Screen"); key("H", "Hide"); key("Q", "Quit"); key("esc", "Cancel")
         }
         .font(.system(size: 10))
@@ -165,11 +166,15 @@ private struct StatusBadges: View {
     var body: some View {
         HStack(spacing: 3) {
             if settings.showSpaceBadge, let s = window.spaceIndex, !window.isOnCurrentSpace {
-                Text("\(s)")
-                    .font(.system(size: 9.5, weight: .bold, design: .rounded))
-                    .frame(minWidth: 16, minHeight: 16)
-                    .background(Circle().fill(.ultraThinMaterial))
-                    .help("On Space \(s)")
+                // Which Space (desktop / full-screen app) the window lives on, not a shortcut.
+                HStack(spacing: 3) {
+                    Image(systemName: "rectangle.on.rectangle").font(.system(size: 8, weight: .semibold))
+                    Text("Space \(s)").font(.system(size: 9.5, weight: .semibold))
+                }
+                .padding(.horizontal, 6)
+                .frame(height: 16)
+                .background(Capsule().fill(.ultraThinMaterial))
+                .help("This window is on Space \(s). Choosing it switches you there")
             }
             if settings.showStatusBadges {
                 if window.isMinimized { badge("minus", "Minimized") }
@@ -186,6 +191,23 @@ private struct StatusBadges: View {
             .frame(width: 16, height: 16)
             .background(Circle().fill(.ultraThinMaterial))
             .help(help)
+    }
+}
+
+/// Keycap showing the number that jumps to this window.
+private struct NumberKey: View {
+    let number: Int
+    let selected: Bool
+    var body: some View {
+        Text("\(number)")
+            .font(.system(size: 10, weight: .bold, design: .rounded))
+            .foregroundStyle(selected ? Color.white : Color.primary)
+            .frame(width: 17, height: 17)
+            .background(RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(selected ? Color.accentColor : Color.black.opacity(0.35)))
+            .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.25), lineWidth: 0.5))
+            .help("Press \(number) to switch to this window")
     }
 }
 
@@ -222,6 +244,7 @@ private struct ThumbnailCell: View {
     let window: SwitcherWindow
     let thumbnail: NSImage?
     let selected: Bool
+    let number: Int?
     let width: CGFloat
     @ObservedObject var settings: SwitcherSettings
     let perform: (WindowSwitcher.Action) -> Void
@@ -252,6 +275,9 @@ private struct ThumbnailCell: View {
             .overlay(alignment: .topTrailing) {
                 StatusBadges(window: window, settings: settings).padding(6)
             }
+            .overlay(alignment: .bottomLeading) {
+                if let number { NumberKey(number: number, selected: selected).padding(7) }
+            }
 
             HStack(spacing: 6) {
                 if let icon = window.icon { Image(nsImage: icon).resizable().frame(width: 18, height: 18) }
@@ -281,6 +307,7 @@ private struct ThumbnailCell: View {
 private struct IconCell: View {
     let window: SwitcherWindow
     let selected: Bool
+    let number: Int?
     let width: CGFloat
     @ObservedObject var settings: SwitcherSettings
 
@@ -294,6 +321,9 @@ private struct IconCell: View {
                         .opacity(window.isMinimized || window.isAppHidden ? 0.6 : 1)
                 }
                 StatusBadges(window: window, settings: settings).offset(x: 6, y: -4)
+            }
+            .overlay(alignment: .bottomLeading) {
+                if let number { NumberKey(number: number, selected: selected).offset(x: -4, y: 4) }
             }
             if settings.showAppName {
                 Text(window.appName)
@@ -314,6 +344,7 @@ private struct IconCell: View {
 private struct TitleRow: View {
     let window: SwitcherWindow
     let selected: Bool
+    let number: Int?
     let width: CGFloat
     @ObservedObject var settings: SwitcherSettings
     let perform: (WindowSwitcher.Action) -> Void
@@ -322,6 +353,7 @@ private struct TitleRow: View {
     var body: some View {
         let h: CGFloat = [30, 36, 44][settings.size.rawValue]
         HStack(spacing: 10) {
+            if let number { NumberKey(number: number, selected: selected) } else { Color.clear.frame(width: 17, height: 17) }
             if let icon = window.icon { Image(nsImage: icon).resizable().frame(width: h * 0.7, height: h * 0.7) }
             Text(window.displayTitle)
                 .font(.system(size: h * 0.36, weight: .medium))

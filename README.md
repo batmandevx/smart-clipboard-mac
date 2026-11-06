@@ -99,9 +99,10 @@ Press **`Space`** on any item to slide open the integrated **Liquid Glass Quick 
 - **Hold `⌥` + tap `Tab`** to see every window as a live thumbnail grid; release `⌥` to jump to it. A quick tap goes straight to the previous window with no flash.
 - **`⌥` + `` ` ``** shows only the current app's windows.
 - **Every Space, including full-screen apps**, plus minimized windows, windows of hidden apps and (optionally) apps with no open windows. Picking a window on another Space switches you there.
+- **Number keys:** the first nine windows carry a `1`–`9` key label; press that number (with `⌥` still held) to jump straight to it.
 - **Type to search:** press `/` while the switcher is open and type part of a window title or app name. You can let go of `⌥` while typing; `↩` switches, `Esc` clears the search.
 - **In-switcher keys:** `⇥`/`⇧⇥`, arrows (grid navigation), `↩`/`Space` select, `W` close, `M` minimize/restore, `F` full screen, `H` hide/unhide app, `Q` quit app, `Esc` cancel. Hover shows close/minimize/full-screen buttons; click to switch.
-- **Preview** of the selected window drawn at its real position on screen; Space-number and minimized/hidden/full-screen badges.
+- **Preview** of the selected window drawn at its real position on screen. A **"Space N"** badge marks windows on another Space (desktop or full-screen app), plus minimized/hidden/full-screen badges.
 - **Settings** (menu bar → Window Switcher → Settings…):
   - **Controls:** hold key `⌥` / `⌃` / `⌘` (`⌘` replaces the system `⌘Tab`); per-shortcut apps / Spaces / screens scope; show delay; hover-to-select; cursor follows focus.
   - **Appearance:** Thumbnails / App Icons / Titles styles; small / medium / large; which screen to show on.
@@ -229,6 +230,7 @@ sequenceDiagram
 | **`⌘⇧2`** | Interactive Screen Text Extractor (drag region & OCR to clipboard) |
 | **`⌥⇥`** (hold `⌥`) | Window Switcher: all windows; release `⌥` to switch (`⇧⇥` back, `W` close, `M` minimize, `F` full screen, `H` hide, `Q` quit, `Esc` cancel) |
 | **`` ⌥` ``** (hold `⌥`) | Window Switcher: current app's windows only |
+| **`1`–`9`** (in switcher) | Jump straight to that window |
 | **`/`** (in switcher) | Search windows by title or app name |
 | **`⇥` / `⇧⇥`** (in history) | Next / previous filter tab |
 | **`⌥⌘V`** | Paste next item in Sequential Queue Mode |
